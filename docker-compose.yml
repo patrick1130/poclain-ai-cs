@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  db:
+    # 采用兼容 ARM64 的官方镜像，确保底层指令集不发生转译卡顿
+    image: mysql:8.0
+    container_name: wechat_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password_test
+      MYSQL_DATABASE: wechat_service_db
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: wechat_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: wechat_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=mysql+pymysql://admin:password@db:3306/wechat_service_db
+      - REDIS_URL=redis://redis:6379/0
+      # 警告：以下密钥在生产环境中必须通过 CI/CD 密文注入
+      - SECRET_KEY=your_super_secret_jwt_key_for_testing_only
+      - WX_APPID=your_test_appid
+      - WX_APPSECRET=your_test_appsecret
+      - WX_TOKEN=your_test_token
+      - WX_ENCODING_AES_KEY=your_test_aes_key
+      - DOUBAO_API_KEY=your_test_doubao_key
+      - DOUBAO_API_SECRET=your_test_doubao_secret
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./backend/vector_db:/app/vector_db
+      - ./backend/uploads:/app/uploads
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: wechat_frontend
+    restart: always
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+  redis_data:
