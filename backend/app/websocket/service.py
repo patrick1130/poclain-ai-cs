@@ -25,7 +25,6 @@ class ServiceConnectionManager:
         self.MAX_PAYLOAD_SIZE = 65536
 
     async def connect(self, websocket: WebSocket, service_id: str):
-        """建立连接并执行并发配额检查"""
         if service_id not in self.active_connections:
             self.active_connections[service_id] = set()
 
@@ -55,9 +54,7 @@ class ServiceConnectionManager:
         return True
 
     def disconnect(self, service_id: str, websocket: WebSocket):
-        """物理销毁死链，执行内存真空回收"""
         if service_id in self.active_connections:
-            # 【安全修复】确保在集合中存在时再移除，防止 KeyError 导致守护进程崩溃
             if websocket in self.active_connections[service_id]:
                 self.active_connections[service_id].remove(websocket)
 
@@ -66,9 +63,7 @@ class ServiceConnectionManager:
                 logger.info(f"⚠️ 客服 {service_id} 彻底离线，已回收连接内存。")
 
     async def send_personal_message(self, message: str, service_id: str):
-        """定向推送：支持多端同步"""
         if service_id in self.active_connections:
-            # 【安全修复】使用 list() 强制拷贝当前引用，防止在迭代时触发 RuntimeError
             for ws in list(self.active_connections[service_id]):
                 try:
                     await ws.send_text(message)
@@ -77,16 +72,12 @@ class ServiceConnectionManager:
                     self.disconnect(service_id, ws)
 
     async def broadcast_message(self, session_id: str, message: dict):
-        """全域多播：无视订阅状态，将消息强制下发给所有在线客服"""
         message_text = json.dumps(message)
-        # 【安全修复】使用 list() 隔离运行时字典变更风险
         all_online_services = list(self.active_connections.keys())
-
         for sid in all_online_services:
             await self.send_personal_message(message_text, sid)
 
     async def notify_session_update(self, session_data: dict):
-        """全局通知：新会话或状态更新"""
         msg = json.dumps({"type": "session_update", "data": session_data})
         for sid in list(self.active_connections.keys()):
             await self.send_personal_message(msg, sid)
@@ -141,33 +132,59 @@ async def websocket_endpoint(
 
         while True:
             try:
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=90.0)
 
                 if len(data) > manager.MAX_PAYLOAD_SIZE:
-                    logger.warning(
-                        f"🚨 负载溢出拦截: 客服 {service_id} 发送报文过大({len(data)} bytes)"
-                    )
+                    logger.warning(f"🚨 负载溢出拦截: 客服 {service_id}")
+                    # 🚨 显式关闭，前端会收到 4009，不再是模糊的 1000
+                    await websocket.close(code=4009, reason="Payload Too Large")
                     break
 
                 payload_data = json.loads(data)
                 msg_type = payload_data.get("type")
 
+                if msg_type == "heartbeat":
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "heartbeat_res",
+                                "data": "pong",
+                                "timestamp": time.time(),
+                            }
+                        )
+                    )
+                    continue
+
                 if msg_type == "ping":
                     await websocket.send_text(
                         json.dumps({"type": "pong", "timestamp": time.time()})
                     )
+                    continue
 
             except asyncio.TimeoutError:
                 logger.info(f"⏳ 物理熔断：客服 {service_id} 长时间无心跳。")
+                try:
+                    # 🚨 显式告知前端是超时断的，非 1000
+                    await websocket.close(code=4008, reason="Heartbeat Timeout")
+                except:
+                    pass
                 break
             except json.JSONDecodeError:
                 continue
+            # ✨ 架构师补丁：拦截正常断开事件，直接抛给外层处理，不当作 Error 打印
+            except WebSocketDisconnect:
+                raise
             except Exception as loop_e:
                 logger.error(f"WebSocket 循环内异常: {loop_e}")
+                try:
+                    await websocket.close(code=1011, reason="Internal Server Error")
+                except:
+                    pass
                 break
 
     except WebSocketDisconnect:
-        manager.disconnect(service_id, websocket)
+        logger.info(f"🔌 客服 {service_id} 链路主动关闭。")
     except Exception as e:
         logger.error(f"🔥 WebSocket 异常中断 [ID: {service_id}]: {e}")
+    finally:
         manager.disconnect(service_id, websocket)

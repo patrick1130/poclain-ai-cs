@@ -19,7 +19,10 @@ vector_db/
 *.sqlite3
 *.sqlite
 /backend/uploads/
-# [架构师补充] RAG 文档处理与微信多媒体下载的临时碎件区
+# 🚨 架构师补丁：屏蔽 RAG 相关的重型物理数据与切图残骸
+/backend/temp_images/
+/backend/data/
+/backend/data/manuals/
 /backend/temp/
 /backend/tmp/
 /backend/media/

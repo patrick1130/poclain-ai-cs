@@ -102,7 +102,9 @@ class VectorDB:
 
                 # 【S级架构杀器：混合检索预过滤 (Hybrid Search Pre-filter)】
                 # 嗅探用户问题中是否包含类似 "MS18", "MK04" 这样的工业型号特征词汇
-                model_keywords = re.findall(r"[A-Za-z]+[-_]?[0-9]+", query)
+                model_keywords = re.findall(
+                    r"(?=[A-Za-z]*[0-9])[A-Za-z0-9\-_/]{3,}", query
+                )
                 where_doc = None
                 target_model = None
 

@@ -213,50 +213,98 @@ const enterSession = (sessionId) => {
 
 const handleTabChange = () => {}
 
-let ws = null
+// ==========================================
+// 🚨 架构师重构：WebSocket 生命周期全局状态管理
+// ==========================================
+let ws = null;
+let reconnectTimer = null;
+let heartbeatTimer = null;
+let lockReconnect = false;
+let isDestroyed = false; // ✨ 核心开关：标记当前组件是否已死亡
 
 const initWebSocket = () => {
+  if (isDestroyed) return; // 幽灵拦截
   if (!serviceId) {
-    ElMessage.error('无法初始化实时引擎：缺少坐席身份凭证')
-    return
+    ElMessage.error('无法初始化实时引擎：缺少坐席身份凭证');
+    return;
   }
 
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = process.env.NODE_ENV === 'development' ? '127.0.0.1:8000' : window.location.host
-  const wsUrl = `${protocol}//${host}/ws/service/${serviceId}?token=${getToken()}`
+  // 物理清空历史残留
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    ws.onclose = null; 
+    ws.onerror = null;
+    ws.close(1000);    
+  }
 
-  ws = new WebSocket(wsUrl)
+  clearTimeout(reconnectTimer);
+  clearInterval(heartbeatTimer);
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = process.env.NODE_ENV === 'development' ? '127.0.0.1:8000' : window.location.host;
+  const wsUrl = `${protocol}//${host}/ws/service/${serviceId}?token=${getToken()}`;
+
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (e) {
+    console.error('WebSocket 实例创建失败:', e);
+    reconnect();
+    return;
+  }
 
   ws.onopen = () => {
-    wsConnected.value = true
-    console.log('[架构日志] Service Global WebSocket Connected.')
-  }
+    if (isDestroyed) {
+      ws.close(); return;
+    }
+    wsConnected.value = true;
+    lockReconnect = false;
+    console.log('✅ [架构日志] WebSocket 链路激活');
+    
+    heartbeatTimer = setInterval(() => {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'heartbeat', data: 'ping' }));
+      }
+    }, 30000);
+  };
 
   ws.onmessage = (event) => {
     try {
-      const payload = JSON.parse(event.data)
-      handleWsEvent(payload)
+      const payload = JSON.parse(event.data);
+      if (payload.type === 'heartbeat_res') return;
+      handleWsEvent(payload);
     } catch (e) {
-      console.error('WS Payload 解析失败:', e)
+      console.error('WS Payload 解析失败:', e);
     }
-  }
+  };
 
-  ws.onclose = () => {
-    wsConnected.value = false
-    console.warn('[架构日志] WebSocket 连接已断开')
-  }
+  ws.onclose = (e) => {
+    if (isDestroyed) return; // 🚨 幽灵组件禁止在此大呼小叫！
+    wsConnected.value = false;
+    clearInterval(heartbeatTimer);
+    console.warn(`❌ [架构日志] WebSocket 异常断开 (Code: ${e.code}, Reason: ${e.reason || '无'})`);
+    reconnect();
+  };
 
-  ws.onerror = (error) => {
-    console.error('WebSocket Error:', error)
-  }
-}
+  ws.onerror = () => {
+    if (isDestroyed) return;
+    wsConnected.value = false;
+    reconnect();
+  };
+};
+
+const reconnect = () => {
+  if (isDestroyed || lockReconnect) return;
+  lockReconnect = true;
+  
+  console.log('🔄 [架构日志] 启动自动重连程序...');
+  reconnectTimer = setTimeout(() => {
+    lockReconnect = false;
+    initWebSocket();
+  }, 5000);
+};
 
 const handleWsEvent = (payload) => {
-  // 【架构级容错修复】为 data 设置默认空对象，抵御后端发送的不含 data 的握手/系统报文
   const { type, data = {} } = payload
-  
   if (type === 'new_message') {
-    // 确保防御性数据校验
     if (!data.session_id) return
     const targetSession = sessionIndexMap.get(String(data.session_id))
     if (targetSession) {
@@ -294,160 +342,52 @@ const formatTime = (isoString) => {
 }
 
 onMounted(() => {
-  fetchSessions()
-  initWebSocket()
+  isDestroyed = false; // 挂载时重置存活状态
+  fetchSessions();
+  initWebSocket();
 })
 
+// 🚨 终极粉碎机：确保组件卸载时，绝不留下一根蛛丝马迹
 onBeforeUnmount(() => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.close(1000, 'Component unmounted')
-    ws = null
-    console.log('[架构日志] Component Unmounted. WebSocket safely closed.')
+  console.log('🧹 [架构日志] 组件卸载，执行物理级连接回收');
+  isDestroyed = true; // 拉下死亡电闸，所有相关回调全部失效
+  clearTimeout(reconnectTimer);
+  clearInterval(heartbeatTimer);
+  
+  if (ws) {
+    ws.onclose = null; // 重点：剥夺遗言权，防止触发 reconnect()
+    ws.onerror = null;
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close(1000, 'Component unmounted');
+    }
+    ws = null;
   }
 })
 </script>
 
 <style scoped>
-.workbench-container {
-  padding: 0;
-  height: calc(100vh - 80px);
-  display: flex;
-  flex-direction: column;
-}
-
-.workbench-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-  background: white;
-  padding: 16px 24px;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-
-.page-title {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: #1f2937;
-  display: flex;
-  align-items: center;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-}
-
-.workbench-main {
-  flex: 1;
-  background: white;
-  border-radius: 8px;
-  padding: 0 24px 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.session-tabs {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-:deep(.el-tabs__content) {
-  flex: 1;
-  overflow-y: auto;
-  padding-top: 16px;
-}
-
-.tab-badge {
-  margin-left: 4px;
-  transform: translateY(-2px);
-}
-
-.session-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 20px;
-  padding-bottom: 24px;
-}
-
-.session-card {
-  border-radius: 8px;
-  transition: all 0.3s ease;
-  border: 1px solid #e5e7eb;
-}
-
-.session-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-}
-
-.active-card {
-  cursor: pointer;
-  border-top: 4px solid #10b981;
-}
-
-.pending-card {
-  border-top: 4px solid #f43f5e;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 16px;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.user-meta {
-  display: flex;
-  flex-direction: column;
-}
-
-.user-name {
-  font-weight: 600;
-  color: #1f2937;
-  font-size: 15px;
-}
-
-.time-ago {
-  font-size: 12px;
-  color: #6b7280;
-  margin-top: 2px;
-}
-
-.card-body {
-  margin-bottom: 16px;
-  min-height: 48px;
-  background-color: #f9fafb;
-  padding: 12px;
-  border-radius: 6px;
-}
-
-.last-message {
-  margin: 0;
-  font-size: 14px;
-  color: #4b5563;
-  line-height: 1.5;
-}
-
-.truncate-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
+/* [样式保持你原本的代码，未做删改] */
+.workbench-container { padding: 0; height: calc(100vh - 80px); display: flex; flex-direction: column; }
+.workbench-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 16px 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05); }
+.page-title { margin: 0; font-size: 20px; font-weight: 600; color: #1f2937; display: flex; align-items: center; }
+.header-actions { display: flex; align-items: center; }
+.workbench-main { flex: 1; background: white; border-radius: 8px; padding: 0 24px 24px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05); overflow: hidden; display: flex; flex-direction: column; }
+.session-tabs { flex: 1; display: flex; flex-direction: column; }
+:deep(.el-tabs__content) { flex: 1; overflow-y: auto; padding-top: 16px; }
+.tab-badge { margin-left: 4px; transform: translateY(-2px); }
+.session-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; padding-bottom: 24px; }
+.session-card { border-radius: 8px; transition: all 0.3s ease; border: 1px solid #e5e7eb; }
+.session-card:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+.active-card { cursor: pointer; border-top: 4px solid #10b981; }
+.pending-card { border-top: 4px solid #f43f5e; }
+.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+.user-info { display: flex; align-items: center; gap: 12px; }
+.user-meta { display: flex; flex-direction: column; }
+.user-name { font-weight: 600; color: #1f2937; font-size: 15px; }
+.time-ago { font-size: 12px; color: #6b7280; margin-top: 2px; }
+.card-body { margin-bottom: 16px; min-height: 48px; background-color: #f9fafb; padding: 12px; border-radius: 6px; }
+.last-message { margin: 0; font-size: 14px; color: #4b5563; line-height: 1.5; }
+.truncate-text { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; }
 .w-full { width: 100%; }
 .ml-3 { margin-left: 12px; }
 .ml-4 { margin-left: 16px; }
