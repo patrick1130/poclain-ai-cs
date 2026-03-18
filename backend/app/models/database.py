@@ -30,21 +30,18 @@ class ServiceAgent(Base):
     avatar = Column(String(255))
     email = Column(String(100), unique=True)
     phone = Column(String(20))
-    status = Column(
-        String(20), default="offline", nullable=False
-    )  # online, offline, busy
+    status = Column(String(20), default="offline", nullable=False)
     is_active = Column(Boolean, default=True)
-    role = Column(String(20), default="agent")  # agent, supervisor, admin
+    role = Column(String(20), default="agent")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     last_login_at = Column(DateTime(timezone=True))
 
-    # 关系
-    # 【架构修复】显式指定 foreign_keys，消除多外键导致的 JOIN 歧义崩溃
+    # 【核心修复】废除 lazy="dynamic"，改用性能优异的 selectin，彻底消除 N+1 全表扫描风险
     sessions = relationship(
         "CustomerSession",
         back_populates="service_agent",
-        lazy="dynamic",
+        lazy="selectin",
         foreign_keys="[CustomerSession.service_agent_id]",
     )
 
@@ -58,10 +55,10 @@ class SessionStatus(str, enum.Enum):
     会话状态枚举
     """
 
-    PENDING = "pending"  # 待处理
-    ACTIVE = "active"  # 进行中
-    AI_HANDLING = "ai_handling"  # AI处理中
-    CLOSED = "closed"  # 已结束
+    PENDING = "pending"
+    ACTIVE = "active"
+    AI_HANDLING = "ai_handling"
+    CLOSED = "closed"
 
 
 class MessageSender(str, enum.Enum):
@@ -69,10 +66,10 @@ class MessageSender(str, enum.Enum):
     消息发送者枚举
     """
 
-    USER = "user"  # 用户
-    SERVICE = "service"  # 客服
-    AI = "ai"  # AI
-    SYSTEM = "system"  # 系统
+    USER = "user"
+    SERVICE = "service"
+    AI = "ai"
+    SYSTEM = "system"
 
 
 class CustomerSession(Base):
@@ -88,7 +85,7 @@ class CustomerSession(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String(100), nullable=False, index=True)  # 微信用户openid
+    user_id = Column(String(100), nullable=False, index=True)
     user_name = Column(String(100))
     user_avatar = Column(String(255))
     status = Column(
@@ -104,20 +101,20 @@ class CustomerSession(Base):
     )
     ended_at = Column(DateTime(timezone=True))
     ended_by = Column(Integer, ForeignKey("service_agents.id"), index=True)
-    satisfaction_score = Column(Integer)  # 1-5分
+    satisfaction_score = Column(Integer)
     satisfaction_comment = Column(Text)
 
-    # 关系
     service_agent = relationship(
         "ServiceAgent", back_populates="sessions", foreign_keys=[service_agent_id]
     )
     ender = relationship("ServiceAgent", foreign_keys=[ended_by])
 
+    # 【核心修复】废除 lazy="dynamic"，替换为现代化急加载策略，防止关联查询导致的连接池干涸
     messages = relationship(
         "Message",
         back_populates="session",
         cascade="all, delete-orphan",
-        lazy="dynamic",
+        lazy="selectin",
     )
 
 
@@ -138,17 +135,15 @@ class Message(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
     is_read = Column(Boolean, default=False)
-    user_name = Column(String(100))  # 发送者姓名
-    user_avatar = Column(String(255))  # 发送者头像
+    user_name = Column(String(100))
+    user_avatar = Column(String(255))
 
     service_agent_id = Column(Integer, ForeignKey("service_agents.id"), index=True)
 
-    # 关系
     session = relationship("CustomerSession", back_populates="messages")
     service_agent_rel = relationship("ServiceAgent", back_populates="messages")
 
 
-# 【核心补全】定义知识库模型，解决启动时的 ImportError 致命问题
 class KnowledgeDoc(Base):
     """
     知识库文档表

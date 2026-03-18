@@ -57,9 +57,10 @@ class Settings(BaseSettings):
     WX_TOKEN: str = Field(..., description="微信消息校验Token")
     WX_ENCODING_AES_KEY: str = Field(..., description="微信消息加密AES Key")
 
-    # 【架构重构】切换为 DeepSeek 大模型配置
-    DEEPSEEK_API_KEY: str = Field(..., description="DeepSeek API 密钥")
-    DEEPSEEK_CHAT_MODEL: str = "deepseek-chat"
+    # 【同源双擎重构】阿里云百炼生态闭环配置
+    DASHSCOPE_API_KEY: str = Field(..., description="阿里云百炼 API 密钥")
+    PRIMARY_CHAT_MODEL: str = "deepseek-v3"  # 主引擎：阿里云托管的 DeepSeek-V3
+    BACKUP_CHAT_MODEL: str = "qwen-max"  # 备引擎：阿里云最强的通义千问 Max
 
     # 【致命安全修复】生产环境兜底防线，默认必须关闭
     DEBUG: bool = False

@@ -1,5 +1,13 @@
-import time
+import os
 import logging
+
+# 物理屏蔽 ChromaDB 的遥测逻辑，消除 capture() 报错噪音
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
+# 物理提升日志等级，屏蔽 onnxruntime 的 CoreML 硬件调度警告
+logging.getLogger("onnxruntime").setLevel(logging.ERROR)
+
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +22,9 @@ from .core.config import settings
 from .core.database import SessionLocal, Base, engine
 from .utils.security import create_default_service_agent
 
+# 🚨 架构师引入：导入我们刚刚编写的 S 级异常基类
+from .exceptions import WeChatCustomerServiceException
+
 # 配置日志引擎
 logging.basicConfig(
     level=logging.INFO,
@@ -21,15 +32,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 【S级加固】初始化基于 Redis 的分布式限流器，防止 CC 攻击与 API 暴力破解
+# 【S级加固】初始化基于 Redis 的分布式限流器
 limiter = Limiter(key_func=get_remote_address, storage_uri=settings.REDIS_URL)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    系统生命周期管理器：执行数据库迁移与安全凭证初始化
-    """
+    """系统生命周期管理器：执行数据库迁移与安全凭证初始化"""
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
@@ -47,17 +56,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    # 生产环境下建议关闭 docs 或增加 Basic Auth 认证
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None,
     lifespan=lifespan,
 )
 
-# 挂载限流器处理器
+# 挂载 CC 限流器处理器
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# 【S级加固】配置严格的 CORS 策略：仅允许白名单内的域名跨域，阻断 CSRF 跨站劫持
+# 【S级加固】配置严格的 CORS 策略
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -69,16 +77,12 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_and_logging_middleware(request: Request, call_next):
-    """
-    S级增强中间件：注入安全响应头并执行精准性能审计
-    """
+    """S级增强中间件：注入安全响应头并执行精准性能审计"""
     start_time = time.time()
-
-    # 执行下游业务逻辑
     response = await call_next(request)
 
-    # 【S级加固】注入深度安全响应头，防御点击劫持与 MIME 类型嗅探
-    response.headers["Server"] = "Poclain-Shield/1.0"  # 隐藏真实技术栈
+    # 注入深度安全响应头
+    response.headers["Server"] = "Poclain-Shield/1.0"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-XSS-Protection"] = "1; mode=block"
@@ -98,13 +102,11 @@ async def security_and_logging_middleware(request: Request, call_next):
 
 # 注册核心业务路由
 app.include_router(api_router, prefix=settings.API_V1_STR)
-
-# 注册全双工 WebSocket 路由：独立命名空间，绕过 HTTP 鉴权沙箱
 app.include_router(websocket_router, prefix="/ws/service")
 
 
 @app.get("/health")
-@limiter.limit("5/minute")  # 健康检查限流，防止探针攻击
+@limiter.limit("5/minute")
 async def health_check(request: Request):
     return {"status": "ok", "timestamp": time.time()}
 
@@ -114,12 +116,41 @@ async def root():
     return {"message": "Poclain Intelligent Customer Service API Ready."}
 
 
+# ==========================================
+# 🚨 架构师补丁：全局异常拦截调度中心
+# ==========================================
+
+
+@app.exception_handler(WeChatCustomerServiceException)
+async def custom_business_exception_handler(
+    request: Request, exc: WeChatCustomerServiceException
+):
+    """
+    业务异常精准拦截：
+    将我们在业务层 raise 的 PromptInjection 等异常，优雅地转换为 JSON 结构发给前端大屏。
+    """
+    logger.warning(f"⚠️ 业务防线拦截 | Code: {exc.error_code} | Msg: {exc.message}")
+
+    # 构造标准错误回包
+    error_response = {
+        "error_code": exc.error_code,
+        "message": exc.message,
+    }
+
+    # 如果是表单验证异常，追加具体出错的字段信息
+    if hasattr(exc, "field_errors") and exc.field_errors:
+        error_response["field_errors"] = exc.field_errors
+
+    return JSONResponse(
+        status_code=exc.status_code or 500,
+        content=error_response,
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """
-    全局异常捕获：屏蔽敏感 Traceback 信息，防止服务器路径泄露
-    """
-    logger.error(f"🔥 未捕获的全局异常: {exc}", exc_info=True)
+    """全局物理异常捕获：屏蔽敏感 Traceback 信息，防止服务器路径泄露"""
+    logger.error(f"🔥 未捕获的底层崩溃: {exc}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "Internal System Error - Please contact the architect."},

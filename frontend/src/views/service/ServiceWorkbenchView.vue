@@ -16,8 +16,8 @@
       </div>
       <div class="header-actions">
         <el-radio-group v-model="agentStatus" @change="handleStatusChange" size="default">
-          <el-radio-button label="online">在线接客</el-radio-button>
-          <el-radio-button label="busy">小休忙碌</el-radio-button>
+          <el-radio-button value="online">在线接客</el-radio-button>
+          <el-radio-button value="busy">小休忙碌</el-radio-button>
         </el-radio-group>
         <el-button @click="fetchSessions" circle class="ml-4"><el-icon><Refresh /></el-icon></el-button>
       </div>

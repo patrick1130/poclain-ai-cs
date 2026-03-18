@@ -186,7 +186,7 @@
             :on-error="handleUploadError"
             :on-change="handleFileChange"
             :on-remove="handleFileRemove"
-            accept=".txt,.md"
+            accept=".txt,.md,.pdf,.xlsx,.xls" 
           >
             <template #trigger>
               <el-button type="primary" plain>
@@ -195,8 +195,8 @@
             </template>
             <template #tip>
               <div class="el-upload__tip text-gray-500 mt-2">
-                目前仅支持上传 .txt 或 .md 格式的纯文本文件。<br>
-                单个文件大小严禁超过 10MB。上传后将自动切片并写入向量大脑。
+                支持上传 .txt,.md,.pdf,.xlsx,.xls格式的产品手册文件。<br>
+                单个文件大小严禁超过 15MB。上传后将自动进行文本清洗并写入向量大脑。
               </div>
             </template>
           </el-upload>
@@ -293,7 +293,7 @@ const getToken = () => {
 // 请求拦截封装
 const api = axios.create({
   baseURL: '/api/v1',
-  timeout: 15000
+  timeout: 30000 // 【性能调优】：由于 PDF 解析和向量化极度消耗时间，将前端超时时间放宽至 30 秒，防止误报网络异常
 })
 api.interceptors.request.use(config => {
   const token = getToken()
@@ -397,7 +397,7 @@ const submitUpload = () => {
   uploadFormRef.value.validate((valid) => {
     if (valid) {
       if (!hasFile.value) {
-        ElMessage.warning('请先选取要入库的 TXT 或 MD 文件')
+        ElMessage.warning('请先选取要入库的文件')
         return
       }
       uploading.value = true

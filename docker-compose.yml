@@ -2,27 +2,31 @@ version: '3.8'
 
 services:
   db:
-    # 采用兼容 ARM64 的官方镜像，确保底层指令集不发生转译卡顿
     image: mysql:8.0
-    container_name: wechat_db
+    container_name: poclain_wechat_db
     restart: always
     environment:
+      # 建议生产环境中将密码改得更复杂
       MYSQL_ROOT_PASSWORD: root_password_test
-      MYSQL_DATABASE: wechat_service_db
+      MYSQL_DATABASE: poclain_ai_db
       MYSQL_USER: admin
       MYSQL_PASSWORD: password
-    ports:
-      - "3306:3306"
+      TZ: Asia/Shanghai
     volumes:
       - mysql_data:/var/lib/mysql
     command: --default-authentication-plugin=mysql_native_password
+    # 增加健康检查，确保后端启动时数据库已就绪
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7.0-alpine
-    container_name: wechat_redis
+    container_name: poclain_wechat_redis
     restart: always
-    ports:
-      - "6379:6379"
+    environment:
+      TZ: Asia/Shanghai
     volumes:
       - redis_data:/data
 
@@ -30,36 +34,43 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: wechat_backend
+    container_name: poclain_wechat_backend
     restart: always
     ports:
       - "8000:8000"
+    # 🚨 架构师防线：采用密文隔离加载
+    # 所有的敏感密钥都去读取上一回合配置的 .env 文件，绝文明文写在这里
+    env_file:
+      - ./backend/.env
     environment:
-      - DATABASE_URL=mysql+pymysql://admin:password@db:3306/wechat_service_db
+      # 覆盖/补充 .env 中的数据库连接，确保使用 docker 内部网络名 (db, redis)
+      - DATABASE_URL=mysql+pymysql://admin:password@db:3306/poclain_ai_db
       - REDIS_URL=redis://redis:6379/0
-      # 警告：以下密钥在生产环境中必须通过 CI/CD 密文注入
-      - SECRET_KEY=your_super_secret_jwt_key_for_testing_only
-      - WX_APPID=your_test_appid
-      - WX_APPSECRET=your_test_appsecret
-      - WX_TOKEN=your_test_token
-      - WX_ENCODING_AES_KEY=your_test_aes_key
-      - DOUBAO_API_KEY=your_test_doubao_key
-      - DOUBAO_API_SECRET=your_test_doubao_secret
+      # 【底层防线】强制掐断 ChromaDB 的遥测数据上报
+      - ANONYMIZED_TELEMETRY=False
+      - TZ=Asia/Shanghai
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     volumes:
+      # 挂载物理目录，确保重启容器后向量大脑和上传文件不丢失
       - ./backend/vector_db:/app/vector_db
       - ./backend/uploads:/app/uploads
+      # 挂载日志目录，方便外部采集
+      - ./backend/logs:/app/logs
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: wechat_frontend
+    container_name: poclain_wechat_frontend
     restart: always
     ports:
       - "8080:80"
+    environment:
+      TZ: Asia/Shanghai
     depends_on:
       - backend
 

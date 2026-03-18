@@ -6,19 +6,23 @@
 !.env.example
 *.pem
 *.key
+# [架构师补充] 屏蔽可能导出的数据库备份文件
+*.sql
+*.dump
 
 # ==========================================
 # 2. 向量数据库与业务数据 (Databases & Data)
 # ==========================================
-# 屏蔽 ChromaDB 本地物理存储目录
 /backend/vector_db/
 vector_db/
-# 屏蔽本地 SQLite 数据库文件 (如果有)
 *.db
 *.sqlite3
 *.sqlite
-# 屏蔽上传的临时文件或知识库原文件
 /backend/uploads/
+# [架构师补充] RAG 文档处理与微信多媒体下载的临时碎件区
+/backend/temp/
+/backend/tmp/
+/backend/media/
 
 # ==========================================
 # 3. Python 后端核心屏蔽 (Backend / Python)
@@ -26,18 +30,22 @@ vector_db/
 __pycache__/
 *.py[cod]
 *$py.class
-# 虚拟环境
 venv/
 .venv/
 env/
 .env_python/
-# 依赖包工具
 pip-log.txt
 pip-delete-this-directory.txt
 .tox/
 .coverage
 htmlcov/
 .pytest_cache/
+# [架构师补充] 现代 Python 类型检查与 Linter 缓存
+.mypy_cache/
+.ruff_cache/
+# [架构师补充] 异步任务队列 Celery 留下的调度碎片 (未来可能用到)
+celerybeat-schedule
+*.pid
 
 # ==========================================
 # 4. 前端与 Node.js 核心屏蔽 (Frontend / Vue)
@@ -51,6 +59,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+# [架构师补充] Vue/Vite 编译与语法检查缓存
+.eslintcache
+.stylelintcache
+node_modules/.cache/
 
 # ==========================================
 # 5. 操作系统与 IDE 缓存 (OS & IDE)
@@ -62,6 +74,9 @@ pnpm-debug.log*
 .Trashes
 ehthumbs.db
 Thumbs.db
+# [架构师补充] 苹果系统顽固隐藏文件
+.AppleDouble
+.LSOverride
 
 # VS Code
 .vscode/

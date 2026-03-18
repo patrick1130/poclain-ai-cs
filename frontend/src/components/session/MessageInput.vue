@@ -1,11 +1,10 @@
 <template>
   <div class="message-input">
-    <!-- 快捷回复 -->
     <div class="quick-replies" v-if="showQuickReplies && quickReplies.length > 0">
       <div class="quick-replies-header">
         <span class="text-sm font-medium">快捷回复</span>
         <el-button
-          type="text"
+          link
           size="small"
           @click="showQuickReplies = false"
         >
@@ -27,12 +26,11 @@
       </div>
     </div>
     
-    <!-- 消息输入区域 -->
     <div class="input-area">
       <div class="input-toolbar">
         <div class="input-tools">
           <el-button
-            type="text"
+            link
             size="small"
             @click="toggleQuickReplies"
             :class="{ 'active': showQuickReplies }"
@@ -41,7 +39,7 @@
           </el-button>
           
           <el-button
-            type="text"
+            link
             size="small"
             @click="insertEmoji"
           >

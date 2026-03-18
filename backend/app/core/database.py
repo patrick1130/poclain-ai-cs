@@ -1,9 +1,16 @@
 import logging
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# 【架构演进】SQLAlchemy 2.0 现代声明式基类
+# 替代旧版的 declarative_base() 函数，提供更完美的 Type Hint 与静态检查支持
+class Base(DeclarativeBase):
+    pass
+
 
 try:
     # 【性能与安全修复】配置高并发连接池防崩溃机制
@@ -21,11 +28,8 @@ try:
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-    # 【架构修复】显式定义并导出 ORM 映射基类 Base，彻底解决 ImportError 启动崩溃
-    Base = declarative_base()
-
 except Exception as e:
-    logger.error(f"数据库引擎初始化失败，请检查 DATABASE_URL 配置是否正确: {e}")
+    logger.error(f"❌ 数据库引擎初始化失败，请检查 DATABASE_URL 配置是否正确: {e}")
     raise e
 
 
