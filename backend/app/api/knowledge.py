@@ -132,7 +132,8 @@ async def _enrich_single_chunk(
 async def _async_enrich_chunks(chunks: List[str]) -> List[str]:
     """并发执行大模型增强任务"""
     sem = asyncio.Semaphore(5)
-    async with httpx.AsyncClient(timeout=40.0, verify=False) as client:
+    # 🚨 架构师修正：强制移除 verify=False，杜绝中间人劫持与证书伪造攻击
+    async with httpx.AsyncClient(timeout=40.0, verify=True) as client:
         tasks = [_enrich_single_chunk(client, chunk, sem) for chunk in chunks]
         return await asyncio.gather(*tasks)
 

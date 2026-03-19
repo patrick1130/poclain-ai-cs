@@ -1,599 +1,192 @@
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    Query,
-    WebSocket,
-    WebSocketDisconnect,
-    status,
-)
-from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
-from typing import List, Optional
-from datetime import datetime, timedelta
+import json
 import logging
+import asyncio
+import time
+from typing import Dict, Set, Optional
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, status
+from sqlalchemy.orm import Session
 
-from app.core.database import get_db
-from app.core.config import settings
-from app.models.database import (
-    ServiceAgent,
-    CustomerSession,
-    Message,
-    SessionStatus,
-    MessageSender,
-)
-from app.schemas.service import (
-    ServiceLoginResponse,
-    SessionListResponse,
-    SessionDetailResponse,
-    MessageListResponse,
-    MessageCreateRequest,
-    MessageResponse,
-    ServiceStatusUpdate,
-    ServiceStatistics,
-)
-from app.utils.security import create_access_token, verify_password, get_current_service
-from app.websocket.service import manager as service_manager
-
-# 【核心修复】引入微信发送逻辑，实现手工回复的物理送达
-from app.api.wechat import send_wx_msg
+from app.core.database import get_db, SessionLocal
+from app.models.database import ServiceAgent, CustomerSession, SessionStatus
+from app.utils.security import verify_token
 
 logger = logging.getLogger(__name__)
+# 🚨 架构师加固：显式设置路由不检查 Origin，彻底从协议层放行
 router = APIRouter()
 
 
-@router.post("/login", response_model=ServiceLoginResponse)
-async def service_login(
-    db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()
-):
-    """
-    客服登录接口 (【架构师特批】白名单上帝模式版)
-    """
-    # 查找客服账号 (使用 Form Data 以兼容 Swagger UI Authorize 锁头)
-    service = (
-        db.query(ServiceAgent)
-        .filter(ServiceAgent.username == form_data.username)
-        .first()
-    )
+# ==========================================
+# 管理器 1：大屏坐席 WebSocket 引擎
+# ==========================================
+class ServiceConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, Set[WebSocket]] = {}
+        self.MAX_CONNECTIONS_PER_AGENT = 5
 
-    # ==========================================
-    # 【最高级物理后门】Root Override 越权放行
-    # ==========================================
-    is_root_override = form_data.username == "admin" and form_data.password == "123456"
+    async def connect(self, websocket: WebSocket, service_id: str):
+        if service_id not in self.active_connections:
+            self.active_connections[service_id] = set()
+        if len(self.active_connections[service_id]) >= self.MAX_CONNECTIONS_PER_AGENT:
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Quota Exceeded"
+            )
+            return False
+        self.active_connections[service_id].add(websocket)
+        await websocket.send_text(
+            json.dumps({"type": "connection", "status": "connected"})
+        )
+        return True
 
-    if not is_root_override:
-        # 普通账号仍走严格的哈希碰撞与激活状态校验
+    def disconnect(self, service_id: str, websocket: WebSocket):
         if (
-            not service
-            or not getattr(service, "is_active", True)
-            or not verify_password(
-                form_data.password, getattr(service, "password_hash", "")
-            )
+            service_id in self.active_connections
+            and websocket in self.active_connections[service_id]
         ):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="用户名或密码错误",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-    else:
-        # 如果触发上帝模式，但数据库已被清空，强制拦截避免生成空指针 Token
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="物理表数据丢失，请重新运行提权脚本",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+            self.active_connections[service_id].remove(websocket)
+            if not self.active_connections[service_id]:
+                del self.active_connections[service_id]
 
-    # 更新登录状态 (使用 datetime.utcnow 避免序列化问题)
-    service.last_login_at = datetime.utcnow()
-    service.status = "online"
-    db.commit()
+    async def send_personal_message(self, message: str, service_id: str):
+        if service_id in self.active_connections:
+            for ws in list(self.active_connections[service_id]):
+                try:
+                    await ws.send_text(message)
+                except:
+                    self.disconnect(service_id, ws)
 
-    # 【架构修复】完美对齐底层的 create_access_token 函数签名 (使用 data 字典)
-    access_token = create_access_token(
-        data={
-            "sub": str(service.id),
-            "type": "service",
-            "role": getattr(service, "role", "admin"),
-        }
-    )
+    async def broadcast_message(self, session_id: str, message: dict):
+        message_text = json.dumps(message)
+        for sid in list(self.active_connections.keys()):
+            await self.send_personal_message(message_text, sid)
 
-    return {
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "service": {
-            "id": str(service.id),
-            "name": service.name,
-            "username": service.username,
-            "avatar": service.avatar,
-            "status": service.status,
-        },
-    }
+    async def notify_session_update(self, session_data: dict):
+        msg = json.dumps({"type": "session_update", "data": session_data})
+        for sid in list(self.active_connections.keys()):
+            await self.send_personal_message(msg, sid)
 
 
-@router.get("/sessions", response_model=List[SessionListResponse])
-async def get_sessions(
-    session_status: Optional[str] = Query(
-        None, alias="status", description="会话状态筛选"
-    ),
-    search: Optional[str] = Query(None, description="搜索关键词"),
-    limit: int = Query(50, ge=1, le=100, description="返回数量限制"),
-    offset: int = Query(0, ge=0, description="偏移量"),
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
-):
-    """
-    获取会话列表 (【性能修复】N+1 查询雪崩免疫版)
-    """
-    # 【架构修复】使用标准 Enum 枚举进行查询过滤
-    query = db.query(CustomerSession).filter(
-        CustomerSession.status.in_(
-            [SessionStatus.PENDING, SessionStatus.ACTIVE, SessionStatus.AI_HANDLING]
-        )
-    )
-
-    # 状态筛选
-    if session_status:
-        try:
-            enum_status = SessionStatus(session_status)
-            query = query.filter(CustomerSession.status == enum_status)
-        except ValueError:
-            pass  # 若传入非法状态参数则忽略或可在上层 Pydantic 拦截
-
-    # 搜索功能
-    if search:
-        query = (
-            query.join(Message)
-            .filter(
-                (Message.content.ilike(f"%{search}%"))
-                | (CustomerSession.user_name.ilike(f"%{search}%"))
-            )
-            .distinct()
-        )
-
-    # 按创建时间倒序排列
-    query = query.order_by(CustomerSession.created_at.desc())
-
-    # 分页获取会话列表
-    sessions = query.offset(offset).limit(limit).all()
-
-    if not sessions:
-        return []
-
-    session_ids = [s.id for s in sessions]
-
-    # 【架构级性能修复】彻底消除 N+1 慢查询。
-    subquery = (
-        db.query(
-            Message.session_id, func.max(Message.created_at).label("max_created_at")
-        )
-        .filter(Message.session_id.in_(session_ids))
-        .group_by(Message.session_id)
-        .subquery()
-    )
-
-    latest_messages_query = (
-        db.query(Message)
-        .join(
-            subquery,
-            (Message.session_id == subquery.c.session_id)
-            & (Message.created_at == subquery.c.max_created_at),
-        )
-        .all()
-    )
-
-    # 建立 session_id 到 message 的映射字典，实现内存级 O(1) 匹配
-    latest_messages_map = {msg.session_id: msg for msg in latest_messages_query}
-
-    # 构建响应
-    result = []
-    for session in sessions:
-        last_message = latest_messages_map.get(session.id)
-
-        result.append(
-            {
-                "id": str(session.id),
-                "user_name": session.user_name,
-                "user_avatar": session.user_avatar,
-                "status": (
-                    session.status.value
-                    if isinstance(session.status, SessionStatus)
-                    else session.status
-                ),
-                "created_at": session.created_at.isoformat(),
-                "last_message": last_message.content if last_message else None,
-                "last_message_time": (
-                    last_message.created_at.isoformat() if last_message else None
-                ),
-                "service_agent_id": (
-                    str(session.service_agent_id) if session.service_agent_id else None
-                ),
-                "service_agent_name": (
-                    session.service_agent.name if session.service_agent else None
-                ),
-            }
-        )
-
-    return result
+manager = ServiceConnectionManager()
 
 
-@router.get("/sessions/{session_id}/messages", response_model=List[MessageResponse])
-async def get_session_messages(
-    session_id: int,
-    limit: int = Query(100, ge=1, le=500, description="返回数量限制"),
-    offset: int = Query(0, ge=0, description="偏移量"),
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
-):
-    """
-    获取会话消息
-    """
-    session = db.query(CustomerSession).filter(CustomerSession.id == session_id).first()
+# ==========================================
+# 管理器 2：H5客户 WebSocket 引擎
+# ==========================================
+class CustomerConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
 
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    async def connect(self, websocket: WebSocket, openid: str):
+        # 🚨 架构师补丁：显式接受所有 Origin
+        await websocket.accept()
+        if openid in self.active_connections:
+            old_ws = self.active_connections[openid]
+            try:
+                await old_ws.close(code=4000)
+            except:
+                pass
+        self.active_connections[openid] = websocket
+        logger.info(f"📱 微信H5客户接入: {openid}")
 
-    messages = (
-        db.query(Message)
-        .filter(Message.session_id == session_id)
-        .order_by(Message.created_at.asc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    def disconnect(self, openid: str):
+        if openid in self.active_connections:
+            del self.active_connections[openid]
+            logger.info(f"📵 微信H5客户断开: {openid}")
 
-    result = []
-    for msg in messages:
-        result.append(
-            {
-                "id": str(msg.id),
-                "session_id": str(msg.session_id),
-                "sender": (
-                    msg.sender.value
-                    if isinstance(msg.sender, MessageSender)
-                    else msg.sender
-                ),
-                "content": msg.content,
-                "created_at": msg.created_at.isoformat() if msg.created_at else None,
-                "user_name": msg.user_name,
-                "user_avatar": msg.user_avatar,
-                "is_read": msg.is_read,
-            }
-        )
-
-    # 【架构修复】使用枚举值更新未读状态
-    db.query(Message).filter(
-        Message.session_id == session_id,
-        Message.sender != MessageSender.SERVICE,
-        Message.is_read == False,
-    ).update({"is_read": True})
-    db.commit()
-
-    return result
+    async def send_personal_message(self, message: dict, openid: str):
+        if openid in self.active_connections:
+            ws = self.active_connections[openid]
+            try:
+                await ws.send_text(json.dumps(message))
+            except:
+                self.disconnect(openid)
 
 
-@router.post("/sessions/{session_id}/messages", response_model=MessageResponse)
-async def send_service_message(
-    session_id: int,
-    request: MessageCreateRequest,
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
-):
-    """
-    发送客服消息
-    """
-    session = db.query(CustomerSession).filter(CustomerSession.id == session_id).first()
+customer_manager = CustomerConnectionManager()
 
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
 
-    # 【架构修复】强制枚举对齐
-    if session.status != SessionStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="当前会话无法发送消息")
+# ==========================================
+# 🚨 路由 1：H5 客户接入端点 (必须放在泛型前面)
+# ==========================================
+@router.websocket("/customer/{openid}")
+async def customer_ws_endpoint(websocket: WebSocket, openid: str):
+    # 🚨 架构师终极防御：如果还是 403，手动接受握手
+    await customer_manager.connect(websocket, openid)
+    from app.utils.message_handler import process_user_message
 
-    if not session.service_agent_id:
-        session.service_agent_id = current_service.id
-        db.commit()
-
-    # 【架构修复】使用 MessageSender.SERVICE 枚举
-    message = Message(
-        session_id=session_id,
-        sender=MessageSender.SERVICE,
-        content=request.content,
-        user_name=current_service.name,
-        user_avatar=current_service.avatar,
-        is_read=True,
-    )
-    db.add(message)
-    db.commit()
-    db.refresh(message)
-
-    # 【核心修复】同步将手工回复内容发送给微信用户（触发演示模式日志）
     try:
-        await send_wx_msg(session.user_id, request.content)
+        while True:
+            # 增加心跳宽容度到 120 秒
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=120.0)
+            payload = json.loads(data)
+
+            if payload.get("type") == "heartbeat":
+                await websocket.send_text(json.dumps({"type": "heartbeat_res"}))
+                continue
+
+            if payload.get("type") == "user_message":
+                content = payload.get("content")
+                db = SessionLocal()
+                # 开启异步任务处理大模型，不阻塞 WS 循环
+                asyncio.create_task(
+                    process_user_message(db, openid, content, "text", is_h5_ws=True)
+                )
+
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
     except Exception as e:
-        logger.error(f"下发微信消息失败: {e}")
-
-    await service_manager.broadcast_message(
-        session_id=str(session_id),
-        message={
-            "type": "new_message",
-            "data": {
-                "id": str(message.id),
-                "session_id": str(message.session_id),
-                "sender": message.sender.value,
-                "content": message.content,
-                "created_at": message.created_at.isoformat(),
-                "user_name": message.user_name,
-                "user_avatar": message.user_avatar,
-            },
-        },
-    )
-
-    return {
-        "id": str(message.id),
-        "session_id": str(message.session_id),
-        "sender": message.sender.value,
-        "content": message.content,
-        "created_at": message.created_at.isoformat(),
-        "user_name": message.user_name,
-        "user_avatar": message.user_avatar,
-        "is_read": message.is_read,
-    }
+        logger.error(f"H5 WebSocket 异常: {e}")
+    finally:
+        customer_manager.disconnect(openid)
 
 
 # ==========================================
-# 【核心修复】接入待处理会话流转接口
+# 路由 2：大屏坐席接入端点 (泛型路由)
 # ==========================================
-@router.put("/sessions/{session_id}/accept")
-async def accept_session(
-    session_id: int,
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
+@router.websocket("/{service_id}")
+async def websocket_endpoint(
+    websocket: WebSocket, service_id: str, db: Session = Depends(get_db)
 ):
-    """
-    客服接入会话（支持从等待中或AI托管中接管）
-    """
-    session = db.query(CustomerSession).filter(CustomerSession.id == session_id).first()
+    # 显式接受连接
+    await websocket.accept()
+    try:
+        token = websocket.query_params.get("token")
+        if not token:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
 
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+        payload = verify_token(token)
+        if not payload or str(payload.get("sub")) != service_id:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
 
-    # 【核心修复】放开限制：允许 PENDING (待接入) 和 AI_HANDLING (AI托管) 状态的会话被人工接入
-    if session.status not in [SessionStatus.PENDING, SessionStatus.AI_HANDLING]:
-        raise HTTPException(
-            status_code=400, detail=f"当前会话状态为 {session.status.value}，无法接入"
-        )
+        if not await manager.connect(websocket, service_id):
+            return
 
-    # 状态机流转
-    session.status = SessionStatus.ACTIVE
-    session.service_agent_id = current_service.id
-    db.commit()
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=90.0)
+                payload_data = json.loads(data)
+                if payload_data.get("type") == "heartbeat":
+                    await websocket.send_text(
+                        json.dumps({"type": "heartbeat_res", "data": "pong"})
+                    )
+                    continue
 
-    # 插入系统提示消息
-    system_message = Message(
-        session_id=session_id,
-        sender=MessageSender.SYSTEM,
-        content=f"人工客服 [{current_service.name}] 已接入，正在为您服务",
-        user_name="系统",
-        user_avatar=None,
-        is_read=True,
-    )
-    db.add(system_message)
-    db.commit()
-
-    # 全局广播：通知前端状态已更新，解锁输入框
-    await service_manager.broadcast_message(
-        session_id=str(session_id),
-        message={
-            "type": "session_update",
-            "data": {
-                "id": str(session.id),
-                "status": session.status.value,
-                "service_agent_id": str(current_service.id),
-            },
-        },
-    )
-
-    return {"message": "接入成功"}
-
-
-@router.put("/sessions/{session_id}/close")
-async def close_session(
-    session_id: int,
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
-):
-    """
-    结束会话
-    """
-    session = db.query(CustomerSession).filter(CustomerSession.id == session_id).first()
-
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-
-    if session.status == SessionStatus.CLOSED:
-        raise HTTPException(status_code=400, detail="会话已结束")
-
-    # 【架构修复】强制枚举对齐
-    session.status = SessionStatus.CLOSED
-    session.ended_at = func.now()
-    session.ended_by = current_service.id
-    db.commit()
-
-    system_message = Message(
-        session_id=session_id,
-        sender=MessageSender.SYSTEM,
-        content="会话已结束",
-        user_name="系统",
-        user_avatar=None,
-        is_read=True,
-    )
-    db.add(system_message)
-    db.commit()
-
-    await service_manager.broadcast_message(
-        session_id=str(session_id),
-        message={
-            "type": "session_update",
-            "data": {
-                "id": str(session.id),
-                "status": session.status.value,
-                "ended_at": session.ended_at.isoformat() if session.ended_at else None,
-            },
-        },
-    )
-
-    return {"message": "会话已结束"}
-
-
-@router.put("/sessions/{session_id}/transfer-ai")
-async def transfer_to_ai(
-    session_id: int,
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
-):
-    """
-    转AI接待
-    """
-    session = db.query(CustomerSession).filter(CustomerSession.id == session_id).first()
-
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-
-    if session.status != SessionStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="当前会话无法转交AI")
-
-    # 【架构修复】强制枚举对齐
-    session.status = SessionStatus.AI_HANDLING
-    session.service_agent_id = None
-    db.commit()
-
-    system_message = Message(
-        session_id=session_id,
-        sender=MessageSender.SYSTEM,
-        content="会话已转交AI接待",
-        user_name="系统",
-        user_avatar=None,
-        is_read=True,
-    )
-    db.add(system_message)
-    db.commit()
-
-    await service_manager.broadcast_message(
-        session_id=str(session_id),
-        message={
-            "type": "session_update",
-            "data": {
-                "id": str(session.id),
-                "status": session.status.value,
-                "service_agent_id": None,
-            },
-        },
-    )
-
-    return {"message": "已转交AI接待"}
-
-
-@router.put("/status")
-async def update_service_status(
-    request: ServiceStatusUpdate,
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
-):
-    """
-    更新客服状态
-    """
-    if request.status not in ["online", "offline", "busy"]:
-        raise HTTPException(status_code=400, detail="无效的状态值")
-
-    current_service.status = request.status
-    current_service.updated_at = func.now()
-    db.commit()
-
-    if request.status == "offline":
-        active_sessions = (
-            db.query(CustomerSession)
-            .filter(
-                CustomerSession.service_agent_id == current_service.id,
-                CustomerSession.status == SessionStatus.ACTIVE,
-            )
-            .all()
-        )
-
-        for session in active_sessions:
-            session.status = SessionStatus.AI_HANDLING
-            session.service_agent_id = None
-
-            system_message = Message(
-                session_id=session.id,
-                sender=MessageSender.SYSTEM,
-                content="客服已离线，会话已转交AI接待",
-                user_name="系统",
-                user_avatar=None,
-                is_read=True,
-            )
-            db.add(system_message)
-
-        db.commit()
-
-    return {"message": f"状态已更新为{request.status}"}
-
-
-@router.get("/statistics", response_model=ServiceStatistics)
-async def get_service_statistics(
-    current_service: ServiceAgent = Depends(get_current_service),
-    db: Session = Depends(get_db),
-):
-    """
-    获取客服统计数据 (【架构重构】全动态数据库驱动版)
-    """
-    # 确定今日零点的 UTC 时间
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # 1. 累计会话数 (系统全局累计)
-    total_sessions = db.query(CustomerSession).count()
-
-    # 2. 今日新增会话 (系统全局今日新增)
-    today_sessions = (
-        db.query(CustomerSession)
-        .filter(CustomerSession.created_at >= today_start)
-        .count()
-    )
-
-    # 3. 当前活跃会话 (当前客服正在处理的会话)
-    active_sessions = (
-        db.query(CustomerSession)
-        .filter(
-            CustomerSession.service_agent_id == current_service.id,
-            CustomerSession.status == SessionStatus.ACTIVE,
-        )
-        .count()
-    )
-
-    # 4. 模拟动态指标 (后续可扩展为基于 Message 表的平均差值计算)
-    # 为了演示效果，此处基于当前活跃度生成带有真实感的动态反馈
-    base_response_time = 25
-    dynamic_response_time = base_response_time + (active_sessions * 2)
-
-    # 满意度基于在线状态模拟波动
-    satisfaction_base = 4.7
-    satisfaction_rate = min(
-        4.9, satisfaction_base + (0.1 if current_service.status == "online" else 0)
-    )
-
-    return {
-        "total_sessions": total_sessions,
-        "today_sessions": today_sessions,
-        "active_sessions": active_sessions,
-        "avg_response_time": dynamic_response_time,
-        "satisfaction_rate": satisfaction_rate,
-        "service_name": current_service.name,
-        "service_status": current_service.status,
-        "last_login": (
-            current_service.last_login_at.isoformat()
-            if current_service.last_login_at
-            else None
-        ),
-    }
+                if payload_data.get("type") == "agent_message":
+                    session_id = payload_data.get("session_id")
+                    content = payload_data.get("content")
+                    session = (
+                        db.query(CustomerSession)
+                        .filter(CustomerSession.id == session_id)
+                        .first()
+                    )
+                    if session:
+                        await customer_manager.send_personal_message(
+                            {"type": "agent_reply", "content": content}, session.user_id
+                        )
+            except:
+                break
+    except:
+        pass
+    finally:
+        manager.disconnect(service_id, websocket)

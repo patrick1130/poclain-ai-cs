@@ -12,6 +12,16 @@ const routes = [
     component: LoginView,
     meta: { requiresAuth: false }
   },
+  // ==========================================
+  // 🚨 架构师新增：H5 移动端客户聊天专属路由
+  // 独立于后台 Layout，且设置为免鉴权访问
+  // ==========================================
+  {
+    path: '/chat',
+    name: 'customer-chat',
+    component: () => import('../views/customer/CustomerChatView.vue'),
+    meta: { requiresAuth: false, title: 'Poclain 官方技术支持' }
+  },
   {
     path: '/',
     name: 'layout',
@@ -90,7 +100,7 @@ router.beforeEach((to, from, next) => {
     // 已登录状态下禁止二次访问登录页，强制引流至工作台
     next('/service')
   } else {
-    // 公共路由（白名单），直接放行
+    // 公共路由（白名单，包含 /login, /chat 等），直接放行
     next()
   }
 })

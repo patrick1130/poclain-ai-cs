@@ -240,7 +240,8 @@ const initWebSocket = () => {
   clearInterval(heartbeatTimer);
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = process.env.NODE_ENV === 'development' ? '127.0.0.1:8000' : window.location.host;
+  // 🚨 架构师修复：弃用 Webpack 遗留环境变量，拥抱 Vite 原生 ESM 探针，彻底根除 ReferenceError 白屏死机
+  const host = import.meta.env.DEV ? '127.0.0.1:8000' : window.location.host;
   const wsUrl = `${protocol}//${host}/ws/service/${serviceId}?token=${getToken()}`;
 
   try {
