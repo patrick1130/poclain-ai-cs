@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -15,20 +15,44 @@ from app.models.database import ServiceAgent
 
 logger = logging.getLogger(__name__)
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# 定义 OAuth2 路由
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/service/login")
 
 
+# ==========================================
+# 🚨 Bcrypt 密码学引擎 (现代原生版)
+# ==========================================
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    """验证密码一致性"""
+    try:
+        return bcrypt.checkpw(
+            plain_password.encode("utf-8"), hashed_password.encode("utf-8")
+        )
+    except Exception as e:
+        logger.error(f"密码校验引擎故障: {e}")
+        return False
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    """生成安全哈希"""
+    # 物理截断：bcrypt 强制要求密码在 72 字节以内，超过部分将被忽略
+    safe_password = password[:72]
+    pwd_bytes = safe_password.encode("utf-8")
+    salt = bcrypt.gensalt()
+    hashed_pwd = bcrypt.hashpw(pwd_bytes, salt)
+    return hashed_pwd.decode("utf-8")
 
 
+# ==========================================
+# JWT 令牌引擎
+# ==========================================
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """签发 JWT"""
     to_encode = data.copy()
+
+    # 🚨 架构师修正：强制将 sub 转换为字符串，防止不同模块读取时类型不匹配导致鉴权崩溃
+    if "sub" in to_encode:
+        to_encode["sub"] = str(to_encode["sub"])
 
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -36,7 +60,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         expire_minutes = getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 60)
         expire = datetime.utcnow() + timedelta(minutes=expire_minutes)
 
-    to_encode.update({"exp": expire, "type": "access_token"})
+    to_encode.update({"exp": expire, "iat": datetime.utcnow(), "type": "access_token"})
 
     algorithm = getattr(settings, "ALGORITHM", "HS256")
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=algorithm)
@@ -45,21 +69,26 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def verify_token(token: str) -> Optional[dict]:
+    """物理校验并解码令牌"""
     try:
         algorithm = getattr(settings, "ALGORITHM", "HS256")
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[algorithm])
 
+        # 安全加固：校验令牌类型
         if payload.get("type") != "access_token":
+            logger.warning("🚫 尝试使用非法类型的 JWT 令牌")
             return None
 
         return payload
-    except JWTError:
+    except JWTError as e:
+        logger.error(f"JWT 签名验证失败: {e}")
         return None
 
 
 async def get_current_service(
     token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
 ) -> ServiceAgent:
+    """FastAPI 依赖项：从头信息获取当前坐席"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -71,7 +100,7 @@ async def get_current_service(
         raise credentials_exception
 
     service_id = payload.get("sub")
-    if not service_id or not str(service_id).isdigit():
+    if not service_id:
         raise credentials_exception
 
     service = db.query(ServiceAgent).filter(ServiceAgent.id == int(service_id)).first()
@@ -81,32 +110,26 @@ async def get_current_service(
     if not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive service agent",
+            detail="Account inactive",
         )
 
     return service
 
 
 def create_default_service_agent(db: Session) -> None:
-    """
-    创建默认客服帐号（安全初始化版）
-    """
+    """初始化默认管理员"""
     existing_admin = (
         db.query(ServiceAgent).filter(ServiceAgent.username == "admin").first()
     )
 
     if not existing_admin:
-        admin_password = os.getenv("INIT_ADMIN_PASSWORD")
-        if not admin_password:
-            admin_password = secrets.token_urlsafe(12)
-            # 【核心修复】废弃 print() 输出明文密码，改用高隔离级 logger，防止被第三方探针持久化窃取
-            logger.critical("==================================================")
-            logger.critical("⚠️ 警告: 未检测到初始密码配置，已生成随机强哈希管理员凭证")
-            logger.critical(f"用户名: admin | 密码已分配，请查看系统安全日志获取")
-            logger.critical("请妥善保管并尽快登录系统修改！")
-            logger.critical("==================================================")
-            # 临时将密码记录至 debug 级别日志中，确保标准日志不泄漏
-            logger.debug(f"Init Admin Auth: admin / {admin_password}")
+        admin_password = getattr(settings, "ADMIN_PASSWORD", "PoclainAdmin2026!")
+
+        logger.critical("==================================================")
+        logger.critical("✅ 初始化：正在创建默认坐席管理员...")
+        logger.critical(f"账号: admin")
+        logger.critical("请通过后台及时修改此初始密码。")
+        logger.critical("==================================================")
 
         default_service = ServiceAgent(
             username="admin",

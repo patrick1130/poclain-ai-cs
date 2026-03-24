@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     # 【安全修复】强制从环境变量加载，剔除硬编码，防止密码泄露
     SECRET_KEY: str = Field(..., description="JWT核心加密密钥，不可泄露")
 
+    # 【架构修复】引入系统初始管理员密码配置，接管 .env 中的值
+    ADMIN_PASSWORD: str = Field(
+        default="PoclainAdmin2026!", description="系统初始管理员密码"
+    )
+
     # 【安全修复】引入合规的 CORS 白名单列表，并支持灵活的环境变量解析
     CORS_ORIGINS: Union[str, List[str]] = Field(
         default=[

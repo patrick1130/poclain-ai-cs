@@ -4,12 +4,14 @@ Poclain 智能客服 - 多模态 PDF 视觉解析器 (S 级)
 """
 
 import os
+import uuid
 import fitz  # PyMuPDF
 import logging
 import asyncio
 from typing import List
 from dashscope import MultiModalConversation
 from ..core.config import settings
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,9 @@ class MultimodalDocumentParser:
         doc = fitz.open(pdf_path)
         full_markdown = []
 
+        # 🚨 架构师修正：生成本次解析任务的唯一事务 ID，实现并发物理隔离
+        transaction_id = uuid.uuid4().hex
+
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
 
@@ -47,20 +52,31 @@ class MultimodalDocumentParser:
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
-            # 临时保存图片给视觉大模型读取
-            temp_img_path = os.path.join(self.temp_dir, f"page_{page_num + 1}.jpg")
-            pix.save(temp_img_path)
-
-            logger.info(
-                f"👁️ 正在利用 Qwen-VL-Max 读取第 {page_num + 1}/{len(doc)} 页..."
+            # 🚨 架构师修正：引入唯一命名空间，防止 Race Condition 导致的跨租户数据污染
+            temp_img_path = os.path.join(
+                self.temp_dir, f"page_{transaction_id}_{page_num + 1}.jpg"
             )
 
-            page_md = await self._analyze_image_with_vl(temp_img_path, page_num + 1)
-            full_markdown.append(page_md)
+            try:
+                # 物理落盘
+                pix.save(temp_img_path)
 
-            # 解析完毕后清理临时图片
-            if os.path.exists(temp_img_path):
-                os.remove(temp_img_path)
+                logger.info(
+                    f"👁️ 正在利用 Qwen-VL-Max 读取第 {page_num + 1}/{len(doc)} 页..."
+                )
+
+                page_md = await self._analyze_image_with_vl(temp_img_path, page_num + 1)
+                full_markdown.append(page_md)
+
+            finally:
+                # 🚨 架构师修正：确立绝对的安全铁律，无论 API 是否崩溃，必须销毁物理切片，防范磁盘耗尽
+                if os.path.exists(temp_img_path):
+                    try:
+                        os.remove(temp_img_path)
+                    except Exception as e:
+                        logger.error(
+                            f"⚠️ 致命：临时文件销毁失败 (PID: {os.getpid()}): {e}"
+                        )
 
         doc.close()
         logger.info(f"✅ PDF 视觉解析完成，共生成 {len(full_markdown)} 页 Markdown。")
@@ -127,3 +143,134 @@ class MultimodalDocumentParser:
         except Exception as e:
             logger.error(f"第 {page_num} 页触发异常: {e}")
             return f"\n\n> [警告：第 {page_num} 页发生引擎崩溃]\n\n"
+
+
+def clean_text(text: str) -> str:
+    """清理文本：压缩多余空白，保留自然段落"""
+    if not text:
+        return ""
+    cleaned = re.sub(r"[ \t\r\f]+", " ", text)
+    cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def split_document(
+    title: str,
+    content: str,
+    category: str,
+    max_chunk_size: int = None,
+    overlap: int = None,
+) -> List[str]:
+    """
+    S级架构切片引擎：将文档切分为多个片段，强制保证任何片段严格小于 max_chunk_size。
+    """
+    if max_chunk_size is None:
+        max_chunk_size = getattr(settings, "KNOWLEDGE_CHUNK_SIZE", 1000)
+    if overlap is None:
+        overlap = getattr(settings, "KNOWLEDGE_CHUNK_OVERLAP", 100)
+
+    header = f"【{category}-{title}】\n"
+    max_content_len = max_chunk_size - len(header)
+
+    if max_content_len <= overlap:
+        max_content_len = 1000
+        overlap = 100
+    if overlap >= max_content_len // 2:
+        overlap = max_content_len // 4
+
+    cleaned_content = clean_text(content)
+    paragraphs = re.split(r"\n+", cleaned_content)
+
+    chunks = []
+    current_text = ""
+
+    def slice_long_text(long_text: str):
+        """内部闭包：处理超长文本的严格物理切片"""
+        start = 0
+        while start < len(long_text):
+            end = start + max_content_len
+            slice_str = long_text[start:end]
+            chunks.append(header + slice_str)
+            if end >= len(long_text):
+                break
+            start += max_content_len - overlap
+
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+
+        # 应对单个恶意长段落
+        if len(paragraph) > max_content_len:
+            if current_text:
+                chunks.append(header + current_text)
+                current_text = ""
+            slice_long_text(paragraph)
+            continue
+
+        # 常规段落合并
+        if len(current_text) + len(paragraph) + 1 > max_content_len:
+            # 当前文本已满，安全结算
+            chunks.append(header + current_text)
+
+            # 抽取重叠句 (Overlap)
+            overlap_text = ""
+            if len(current_text) > overlap:
+                overlap_text = current_text[-overlap:]
+                last_period = max(overlap_text.rfind("。"), overlap_text.rfind("."))
+                if last_period != -1 and last_period < len(overlap_text) - 1:
+                    overlap_text = overlap_text[last_period + 1 :].strip()
+            else:
+                overlap_text = current_text
+
+            # 拼接产生新块
+            new_text = overlap_text + "\n" + paragraph if overlap_text else paragraph
+
+            # 🚨 架构师补丁：防止 Overlap + Paragraph 再次发生溢出
+            if len(new_text) > max_content_len:
+                slice_long_text(new_text)
+                current_text = ""
+            else:
+                current_text = new_text
+        else:
+            current_text = (
+                current_text + "\n" + paragraph if current_text else paragraph
+            )
+
+    # 结算最后一个残留片段
+    if current_text:
+        chunks.append(header + current_text)
+
+    return chunks
+
+
+def merge_overlapping_chunks(
+    chunks: List[str], overlap_threshold: float = 0.5
+) -> List[str]:
+    """合并重叠度过高的片段，优化检索噪音"""
+    if not chunks:
+        return []
+
+    merged = [chunks[0]]
+
+    for current in chunks[1:]:
+        previous = merged[-1]
+        max_possible_overlap = min(len(previous), len(current))
+        overlap_length = 0
+
+        # $O(L)$ 级滑动窗口匹配
+        for i in range(max_possible_overlap, 0, -1):
+            if previous[-i:] == current[:i]:
+                overlap_length = i
+                break
+
+        overlap_ratio = (
+            overlap_length / max_possible_overlap if max_possible_overlap > 0 else 0.0
+        )
+
+        if overlap_ratio > overlap_threshold:
+            merged[-1] = previous + current[overlap_length:]
+        else:
+            merged.append(current)
+
+    return merged

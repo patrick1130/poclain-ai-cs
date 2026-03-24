@@ -153,7 +153,6 @@ const route = useRoute()
 const router = useRouter()
 const sessionId = route.params.id
 
-// 基础状态机
 const initialLoading = ref(true)
 const sending = ref(false)
 const sessionInfo = ref(null)
@@ -161,12 +160,10 @@ const messages = ref([])
 const inputText = ref('')
 const messagesContainer = ref(null)
 
-// 静态资源预设
 const defaultAvatar = 'https://cube.elemecdn.com/3/7c/3ea6beec64369c2642b92c6726f1epng.png'
 const defaultServiceAvatar = 'https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png'
 const aiAvatar = 'https://api.dicebear.com/7.x/bottts/svg?seed=PoclainAI'
 
-// 鉴权解析
 const getToken = () => localStorage.getItem('access_token') || localStorage.getItem('token') || ''
 const getServiceIdFromToken = () => {
   const token = getToken()
@@ -184,9 +181,6 @@ api.interceptors.request.use(config => {
   return config
 })
 
-// ==========================================
-// 核心业务：渲染流同步与帧刷新
-// ==========================================
 const scrollToBottom = async () => {
   await nextTick()
   if (messagesContainer.value) {
@@ -196,7 +190,6 @@ const scrollToBottom = async () => {
 
 const fetchSessionDetail = async () => {
   try {
-    // 【核心修复 1】将 limit 改回后端的安全线 100，彻底消灭 422 报错！
     const res = await api.get('/service/sessions', { params: { limit: 100 } })
     const target = res.data.find(s => String(s.id) === String(sessionId))
     if (!target) {
@@ -222,9 +215,6 @@ const fetchMessages = async () => {
   }
 }
 
-// ==========================================
-// 核心业务：全双工动作发射
-// ==========================================
 const sendMessage = async () => {
   const content = inputText.value.trim()
   if (!content) return
@@ -266,21 +256,19 @@ const handleKeydown = (e) => {
   }
 }
 
-// ==========================================
-// 核心业务：状态机控制 (Transfer & Close)
-// ==========================================
+// 🚨 架构师物理修复：将所有的 api.put 强制收敛为正确的 RESTful api.post，防止 405 越权
 const acceptSession = async () => {
   try {
-    await api.put(`/service/sessions/${sessionId}/accept`)
+    await api.post(`/service/sessions/${sessionId}/accept`)
     ElMessage.success('已夺取会话控制权')
-    await fetchSessionDetail() // 重新拉取最新状态解锁输入框
+    await fetchSessionDetail()
   } catch (error) { ElMessage.error('接管失败') }
 }
 
 const transferToAI = async () => {
   try {
     await ElMessageBox.confirm('将会话退回给 AI 托管？', '操作确认', { confirmButtonText: '转交 AI' })
-    await api.put(`/service/sessions/${sessionId}/transfer-ai`)
+    await api.post(`/service/sessions/${sessionId}/transfer-ai`)
     ElMessage.success('已转交 AI 引擎')
     await fetchSessionDetail()
   } catch (e) { if (e !== 'cancel') ElMessage.error('转交失败') }
@@ -289,7 +277,7 @@ const transferToAI = async () => {
 const closeSession = async () => {
   try {
     await ElMessageBox.confirm('彻底关闭当前客户会话？', '结束服务', { type: 'warning' })
-    await api.put(`/service/sessions/${sessionId}/close`)
+    await api.post(`/service/sessions/${sessionId}/close`)
     ElMessage.success('会话已关闭')
     goBack()
   } catch (e) { if (e !== 'cancel') ElMessage.error('关闭失败') }
@@ -298,47 +286,60 @@ const closeSession = async () => {
 const goBack = () => { router.push('/service') }
 
 // ==========================================
-// 核心层：作用域级 WebSocket 引擎
+// 🚨 架构师重构：WebSocket 生命周期全局状态管理 (防止 1008 内存溢出)
 // ==========================================
-let ws = null
+let ws = null;
+let isDestroyed = false;
 
 const initWebSocket = () => {
-  if (!serviceId) return
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  if (isDestroyed || !serviceId) return;
+
+  // 清除僵尸连接
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.close(1000);
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = import.meta.env.DEV ? '127.0.0.1:8000' : window.location.host;
   
-  // 🚨 架构师修复：弃用 Webpack 遗留环境变量，拥抱 Vite 原生 ESM 探针
-  const host = import.meta.env.DEV ? '127.0.0.1:8000' : window.location.host
-  
-  // 绕过 HTTP 403 拦截，直连原生 WS 网关
-  ws = new WebSocket(`${protocol}//${host}/ws/service/${serviceId}?token=${getToken()}`)
+  ws = new WebSocket(`${protocol}//${host}/ws/service/${serviceId}?token=${getToken()}`);
 
   ws.onmessage = (event) => {
     try {
-      // 【核心修复 2】容错解构，防止系统握手包没有 data 导致读取 undefined 引发全盘崩溃
-      const payload = JSON.parse(event.data)
-      const type = payload.type
-      const data = payload.data || {} 
+      const payload = JSON.parse(event.data);
+      if (payload.type === 'heartbeat_res') return;
+      
+      const type = payload.type;
+      const data = payload.data || {};
 
-      if (String(data.session_id || data.id) !== String(sessionId)) return
+      if (String(data.session_id || data.id) !== String(sessionId)) return;
 
       if (type === 'new_message') {
         if (!messages.value.some(m => m.id === data.id)) {
-          messages.value.push(data)
-          scrollToBottom()
+          messages.value.push(data);
+          scrollToBottom();
         }
       } else if (type === 'session_update') {
-        sessionInfo.value.status = data.status
+        sessionInfo.value.status = data.status;
         if (data.status === 'closed') {
-          ElMessage.warning('用户或系统已结束该会话')
+          ElMessage.warning('用户或系统已结束该会话');
         }
       }
-    } catch (e) { console.error('WS Data Parse Error', e) }
-  }
-}
+    } catch (e) { 
+      console.error('WS Data Parse Error', e);
+    }
+  };
 
-// ==========================================
-// UI 工具函数
-// ==========================================
+  ws.onclose = (e) => {
+    if (!isDestroyed) {
+      console.warn(`❌ 详情页 WS 异常断开 (Code: ${e.code})`);
+      setTimeout(initWebSocket, 3000);
+    }
+  };
+};
+
 const getStatusType = (status) => {
   if (status === 'active') return 'success'
   if (status === 'ai_handling') return 'warning'
@@ -376,20 +377,24 @@ const formatTimeOnly = (iso) => {
   return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-// ==========================================
-// 钩子绑定
-// ==========================================
 onMounted(async () => {
-  await fetchSessionDetail()
-  await fetchMessages()
-  initialLoading.value = false
-  initWebSocket()
+  isDestroyed = false;
+  await fetchSessionDetail();
+  await fetchMessages();
+  initialLoading.value = false;
+  initWebSocket();
 })
 
+// 🚨 终极粉碎机：确保组件卸载时，释放连接池资源
 onBeforeUnmount(() => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.close(1000, 'Session detail unmounted')
-    ws = null
+  isDestroyed = true;
+  if (ws) {
+    ws.onclose = null;
+    ws.onerror = null;
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close(1000, 'Session detail unmounted');
+    }
+    ws = null;
   }
 })
 </script>
@@ -405,7 +410,6 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* 顶部控制台 */
 .chat-header {
   display: flex;
   justify-content: space-between;
@@ -424,7 +428,6 @@ onBeforeUnmount(() => {
   color: #1e293b;
 }
 
-/* 流式渲染区 */
 .chat-messages-area {
   flex: 1;
   padding: 24px;
@@ -491,24 +494,22 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 
-/* 气泡着色器 */
 .bubble-user {
   background-color: #f1f5f9;
   color: #334155;
   border-top-left-radius: 4px;
 }
 .bubble-service {
-  background-color: #3b82f6; /* 微信蓝/企业蓝 */
+  background-color: #3b82f6; 
   color: #ffffff;
   border-top-right-radius: 4px;
 }
 .bubble-ai {
-  background-color: #10b981; /* 翠绿色 */
+  background-color: #10b981; 
   color: #ffffff;
   border-top-right-radius: 4px;
 }
 
-/* 输入发射区 */
 .chat-input-area {
   border-top: 1px solid #e2e8f0;
   padding: 12px 24px 24px;
@@ -545,7 +546,6 @@ onBeforeUnmount(() => {
   border-radius: 8px;
 }
 
-/* 冻结遮罩层 */
 .disabled-mask {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -562,7 +562,6 @@ onBeforeUnmount(() => {
   font-weight: 500;
 }
 
-/* 原子类 */
 .mr-1 { margin-right: 4px; }
 .mr-2 { margin-right: 8px; }
 .mr-3 { margin-right: 12px; }

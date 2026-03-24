@@ -9,7 +9,7 @@ const service = axios.create({
 // 请求拦截器
 service.interceptors.request.use(
   config => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem('token') || localStorage.getItem('access_token')
     if (token) {
       config.headers['Authorization'] = `Bearer ${token}`
     }
@@ -31,9 +31,12 @@ service.interceptors.response.use(
     console.error('响应错误:', error)
     if (error.response && error.response.status === 401) {
       localStorage.removeItem('token')
+      localStorage.removeItem('access_token')
       localStorage.removeItem('serviceId')
       localStorage.removeItem('serviceInfo')
-      window.location.href = '/login'
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(error)
   }
@@ -61,15 +64,15 @@ export const sendServiceMessage = (sessionId, content) => {
 }
 
 export const closeSession = (sessionId) => {
-  return service.put(`/service/sessions/${sessionId}/close`)
+  return service.post(`/service/sessions/${sessionId}/close`)
 }
 
 export const acceptSession = (sessionId) => {
-  return service.put(`/service/sessions/${sessionId}/accept`)
+  return service.post(`/service/sessions/${sessionId}/accept`)
 }
 
 export const transferToAI = (sessionId) => {
-  return service.put(`/service/sessions/${sessionId}/transfer-ai`)
+  return service.post(`/service/sessions/${sessionId}/transfer-ai`)
 }
 
 export const updateServiceStatus = (status) => {
@@ -81,11 +84,11 @@ export const getServiceStatistics = () => {
 }
 
 export const getKnowledgeDocs = () => {
-  return service.get('/knowledge/documents')
+  return service.get('/knowledge/list')
 }
 
 export const deleteKnowledgeDoc = (id) => {
-  return service.delete(`/knowledge/documents/${id}`)
+  return service.delete(`/knowledge/${id}`)
 }
 
 export default service

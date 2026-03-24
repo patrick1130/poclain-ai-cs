@@ -19,7 +19,7 @@
         <el-col :span="8">
           <el-input
             v-model="searchKeyword"
-            placeholder="搜索文档标题或内容..."
+            placeholder="搜索文档标题 or 内容..."
             clearable
             @input="handleSearch"
           >
@@ -62,11 +62,7 @@
         border
         stripe
       >
-        <el-table-column
-          prop="title"
-          label="文档标题"
-          min-width="250"
-        >
+        <el-table-column prop="title" label="文档标题" min-width="250">
           <template #default="scope">
             <div class="document-title">
               <el-icon class="document-icon"><Document /></el-icon>
@@ -75,62 +71,31 @@
           </template>
         </el-table-column>
 
-        <el-table-column
-          prop="category"
-          label="业务分类"
-          width="150"
-          align="center"
-        >
+        <el-table-column prop="category" label="业务分类" width="150" align="center">
           <template #default="scope">
-            <el-tag size="small" type="primary" effect="light">
-              {{ scope.row.category }}
-            </el-tag>
+            <el-tag size="small" type="primary" effect="light">{{ scope.row.category }}</el-tag>
           </template>
         </el-table-column>
 
-        <el-table-column
-          prop="version"
-          label="版本迭代"
-          width="100"
-          align="center"
-        >
+        <el-table-column prop="version" label="版本迭代" width="100" align="center">
           <template #default="scope">
             <el-tag size="small" type="info">v{{ scope.row.version }}</el-tag>
           </template>
         </el-table-column>
 
-        <el-table-column
-          prop="create_time"
-          label="入库时间"
-          width="180"
-          align="center"
-        >
+        <el-table-column prop="create_time" label="入库时间" width="180" align="center">
           <template #default="scope">
             {{ formatDateTime(scope.row.create_time) }}
           </template>
         </el-table-column>
 
-        <el-table-column
-          label="操作"
-          width="180"
-          align="center"
-          fixed="right"
-        >
+        <el-table-column label="操作" width="180" align="center" fixed="right">
           <template #default="scope">
-            <el-button
-              size="small"
-              type="primary"
-              plain
-              @click="handleView(scope.row)"
-            >
+            <el-button size="small" type="primary" plain @click="handleView(scope.row)">
               <el-icon><View /></el-icon>
               查看
             </el-button>
-            <el-button
-              size="small"
-              type="danger"
-              @click="handleDelete(scope.row)"
-            >
+            <el-button size="small" type="danger" @click="handleDelete(scope.row)">
               <el-icon><Delete /></el-icon>
               移除
             </el-button>
@@ -221,7 +186,7 @@
     <el-drawer
       v-model="drawerVisible"
       :title="currentDoc?.title || '文档详情'"
-      size="50%"
+      size="55%"
       direction="rtl"
       destroy-on-close
     >
@@ -230,27 +195,25 @@
           <div class="doc-meta-header">
             <el-tag size="small" type="primary">{{ currentDoc.category }}</el-tag>
             <el-tag size="small" type="info">v{{ currentDoc.version }}</el-tag>
-            <span class="meta-time">入库时间: {{ formatDateTime(currentDoc.create_time) }}</span>
+            <span class="meta-time">最后更新: {{ formatDateTime(currentDoc.update_time || currentDoc.create_time) }}</span>
           </div>
           <el-divider border-style="dashed" />
-          <div class="doc-text-content">
-            {{ currentDoc.content }}
-          </div>
+          
+          <div class="doc-html-content" v-html="safeDrawerHtml"></div>
         </template>
       </div>
     </el-drawer>
-
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import {
-  Upload, Refresh, Search, View, Delete, Document
-} from '@element-plus/icons-vue'
+import { Upload, Refresh, Search, View, Delete, Document } from '@element-plus/icons-vue'
 import axios from 'axios'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 // 基础配置
 const router = useRouter()
@@ -261,14 +224,9 @@ const loading = ref(false)
 const documents = ref([])
 const total = ref(0)
 const categories = ref([])
-
 const searchKeyword = ref('')
 const categoryFilter = ref('')
-
-const pagination = reactive({
-  currentPage: 1,
-  pageSize: 10
-})
+const pagination = reactive({ currentPage: 1, pageSize: 10 })
 
 // 上传表单管理
 const uploadDialogVisible = ref(false)
@@ -276,35 +234,57 @@ const uploadRef = ref(null)
 const uploadFormRef = ref(null)
 const uploading = ref(false)
 const hasFile = ref(false)
-const uploadForm = reactive({
-  category: ''
-})
+const uploadForm = reactive({ category: '' })
 
-// 抽屉状态管理
+// 抽屉详情
 const drawerVisible = ref(false)
 const drawerLoading = ref(false)
 const currentDoc = ref(null)
 
-// 工具函数：获取 Token
-const getToken = () => {
-  return localStorage.getItem('access_token') || localStorage.getItem('token') || ''
-}
+// 🚨 侧边抽屉的安全 HTML 计算属性：防止 XSS 并渲染表格
+const safeDrawerHtml = computed(() => {
+  if (!currentDoc.value || !currentDoc.value.content) return ''
+  const rawHtml = marked.parse(currentDoc.value.content)
+  return DOMPurify.sanitize(rawHtml)
+})
 
-// 请求拦截封装
+// 工具函数
+const getToken = () => localStorage.getItem('access_token') || localStorage.getItem('token') || ''
+
 const api = axios.create({
   baseURL: '/api/v1',
-  timeout: 30000 // 【性能调优】：由于 PDF 解析和向量化极度消耗时间，将前端超时时间放宽至 30 秒，防止误报网络异常
+  timeout: 30000 
 })
+
 api.interceptors.request.use(config => {
   const token = getToken()
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
+  if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
 
 // ==========================================
-// 核心业务逻辑
+// 🚨 核心逻辑修复：上传弹窗控制引擎
+// ==========================================
+const handleUpload = async () => {
+  // 重置表单状态
+  uploadForm.category = ''
+  hasFile.value = false
+  
+  // 唤起弹窗
+  uploadDialogVisible.value = true
+  
+  // 确保 DOM 挂载后执行 Ref 重置，防止初次打开报错
+  await nextTick()
+  if (uploadFormRef.value) {
+    uploadFormRef.value.resetFields()
+  }
+  if (uploadRef.value) {
+    uploadRef.value.clearFiles()
+  }
+}
+
+// ==========================================
+// 业务逻辑
 // ==========================================
 
 const fetchCategories = async () => {
@@ -332,128 +312,16 @@ const fetchDocuments = async () => {
     }
     if (searchKeyword.value) params.keyword = searchKeyword.value
     if (categoryFilter.value) params.category = categoryFilter.value
-
     const res = await api.get('/knowledge/docs', { params })
     documents.value = res.data
     total.value = res.data.length 
   } catch (error) {
-    ElMessage.error('获取知识库列表失败，请检查网络')
-    console.error(error)
+    ElMessage.error('获取知识库列表失败')
   } finally {
     loading.value = false
   }
 }
 
-const handleDelete = async (row) => {
-  try {
-    await ElMessageBox.confirm(
-      `确定要将知识库文档【${row.title}】彻底删除吗？这会同时擦除 AI 向量大脑中的记忆。`,
-      '危险操作确认',
-      {
-        confirmButtonText: '强制删除',
-        cancelButtonText: '取消',
-        type: 'error'
-      }
-    )
-    
-    loading.value = true
-    await api.delete(`/knowledge/docs/${row.id}`)
-    ElMessage.success('文档及其向量数据已成功擦除')
-    
-    if (documents.value.length === 1 && pagination.currentPage > 1) {
-      pagination.currentPage--
-    }
-    fetchDocuments()
-    fetchCategories()
-    
-  } catch (error) {
-    if (error !== 'cancel') {
-      ElMessage.error(error.response?.data?.detail || '擦除失败，请联系管理员')
-    }
-  } finally {
-    loading.value = false
-  }
-}
-
-// ==========================================
-// 上传链路控制
-// ==========================================
-
-const handleUpload = () => {
-  uploadForm.category = ''
-  hasFile.value = false
-  uploadDialogVisible.value = true
-}
-
-const handleFileChange = (file, fileList) => {
-  hasFile.value = fileList.length > 0
-}
-
-const handleFileRemove = (file, fileList) => {
-  hasFile.value = fileList.length > 0
-}
-
-const submitUpload = () => {
-  uploadFormRef.value.validate((valid) => {
-    if (valid) {
-      if (!hasFile.value) {
-        ElMessage.warning('请先选取要入库的文件')
-        return
-      }
-      uploading.value = true
-      uploadRef.value.submit()
-    }
-  })
-}
-
-const handleUploadSuccess = (response) => {
-  uploading.value = false
-  uploadDialogVisible.value = false
-  ElMessage.success('知识库文档上传并向量化成功！AI 大脑已更新。')
-  fetchDocuments()
-  fetchCategories()
-}
-
-const handleUploadError = (error) => {
-  uploading.value = false
-  try {
-    const errorData = JSON.parse(error.message)
-    ElMessage.error(errorData.detail || '文档入库失败，可能是体积过大或向量库异常')
-  } catch (e) {
-    ElMessage.error('网络或服务器异常，入库失败')
-  }
-}
-
-// ==========================================
-// 交互事件绑定
-// ==========================================
-
-const handleSearch = () => {
-  pagination.currentPage = 1
-  fetchDocuments()
-}
-
-const handleFilter = () => {
-  pagination.currentPage = 1
-  fetchDocuments()
-}
-
-const handleRefresh = () => {
-  fetchDocuments()
-  fetchCategories()
-}
-
-const handleSizeChange = (size) => {
-  pagination.pageSize = size
-  fetchDocuments()
-}
-
-const handleCurrentChange = (current) => {
-  pagination.currentPage = current
-  fetchDocuments()
-}
-
-// 【核心修复】拉取详情数据并展开抽屉
 const handleView = async (row) => {
   drawerVisible.value = true
   drawerLoading.value = true
@@ -462,136 +330,120 @@ const handleView = async (row) => {
     const res = await api.get(`/knowledge/docs/${row.id}`)
     currentDoc.value = res.data
   } catch (error) {
-    ElMessage.error('读取文档详情失败')
+    ElMessage.error('读取详情失败')
     drawerVisible.value = false
   } finally {
     drawerLoading.value = false
   }
 }
 
-const formatDateTime = (dateString) => {
-  if (!dateString) return '-'
-  const date = new Date(dateString)
-  return date.toLocaleString('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit'
+const handleDelete = async (row) => {
+  try {
+    await ElMessageBox.confirm(`确定要彻底删除【${row.title}】吗？AI 记忆将被同步擦除。`, '警告', {
+      confirmButtonText: '删除', cancelButtonText: '取消', type: 'error'
+    })
+    loading.value = true
+    await api.delete(`/knowledge/docs/${row.id}`)
+    ElMessage.success('已删除')
+    fetchDocuments()
+    fetchCategories()
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error('操作失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+const submitUpload = () => {
+  uploadFormRef.value.validate((valid) => {
+    if (valid && hasFile.value) {
+      uploading.value = true
+      uploadRef.value.submit()
+    }
   })
 }
 
-onMounted(() => {
-  fetchCategories()
+const handleUploadSuccess = () => {
+  uploading.value = false
+  uploadDialogVisible.value = false
+  ElMessage.success('入库成功')
   fetchDocuments()
-})
+  fetchCategories()
+}
+
+const handleUploadError = () => {
+  uploading.value = false
+  ElMessage.error('入库失败')
+}
+
+const handleFileChange = (f, fl) => hasFile.value = fl.length > 0
+const handleFileRemove = (f, fl) => hasFile.value = fl.length > 0
+const handleSearch = () => { pagination.currentPage = 1; fetchDocuments() }
+const handleFilter = () => { pagination.currentPage = 1; fetchDocuments() }
+const handleRefresh = () => { fetchDocuments(); fetchCategories() }
+const handleSizeChange = (s) => { pagination.pageSize = s; fetchDocuments() }
+const handleCurrentChange = (c) => { pagination.currentPage = c; fetchDocuments() }
+
+const formatDateTime = (s) => {
+  if (!s) return '-'
+  return new Date(s).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+  })
+}
+
+onMounted(() => { fetchCategories(); fetchDocuments() })
 </script>
 
 <style scoped>
-.knowledge-base {
-  padding: 0;
-}
+/* 样式部分保持不变 */
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.page-title { margin: 0; font-size: 24px; font-weight: 600; color: #1f2937; }
+.header-actions { display: flex; gap: 8px; }
+.search-filters { background: white; padding: 16px; border-radius: 8px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); }
+.filter-info { display: flex; align-items: center; justify-content: flex-end; height: 100%; }
+.document-list { background: white; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); }
+.pagination { background: white; padding: 16px; border-radius: 8px; display: flex; justify-content: flex-end; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); }
+.document-title { display: flex; align-items: center; gap: 8px; }
+.document-icon { font-size: 18px; color: #409eff; }
+.title-text { font-weight: 500; color: #1f2937; }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-}
+.drawer-content-wrapper { padding: 0 24px 24px; height: 100%; overflow-y: auto; }
+.doc-meta-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.meta-time { font-size: 13px; color: #909399; margin-left: auto; }
 
-.page-title {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 600;
-  color: #1f2937;
-}
-
-.header-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.search-filters {
-  background: white;
-  padding: 16px;
-  border-radius: 8px;
-  margin-bottom: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-.filter-info {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  height: 100%;
-}
-
-.document-list {
-  background: white;
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-.pagination {
-  background: white;
-  padding: 16px;
-  border-radius: 8px;
-  display: flex;
-  justify-content: flex-end;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-.document-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.document-icon {
-  font-size: 18px;
-  color: #409eff;
-}
-
-.title-text {
-  font-weight: 500;
-  color: #1f2937;
-}
-
-:deep(.el-dialog__body) {
-  padding-top: 10px;
-}
-:deep(.el-upload-list__item) {
-  transition: none;
-}
-
-/* 抽屉样式修复 */
-.drawer-content-wrapper {
-  padding: 0 20px 20px;
-  height: 100%;
-  overflow-y: auto;
-}
-
-.doc-meta-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.meta-time {
-  font-size: 13px;
-  color: #909399;
-  margin-left: auto;
-}
-
-.doc-text-content {
+.doc-html-content {
   font-size: 14px;
-  line-height: 1.8;
-  color: #303133;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  background-color: #f8f9fa;
+  line-height: 1.6;
+  color: #334155;
+  background-color: #ffffff;
   padding: 16px;
   border-radius: 6px;
-  border: 1px solid #ebeef5;
+}
+
+.doc-html-content :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  border: 1px solid #e2e8f0;
+}
+.doc-html-content :deep(th), 
+.doc-html-content :deep(td) {
+  border: 1px solid #e2e8f0;
+  padding: 12px;
+  text-align: left;
+}
+.doc-html-content :deep(th) {
+  background-color: #f8fafc;
+  font-weight: 600;
+  color: #1e293b;
+}
+.doc-html-content :deep(tr:nth-child(even)) {
+  background-color: #f9fafb;
+}
+.doc-html-content :deep(h1), 
+.doc-html-content :deep(h2) {
+  margin-top: 20px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #edf2f7;
 }
 </style>

@@ -1,12 +1,13 @@
 <template>
-  <el-config-provider :locale="zhCn">
+  <el-config-provider :locale="en">
     <router-view />
   </el-config-provider>
 </template>
 
 <script setup>
 import { ElConfigProvider } from 'element-plus'
-import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
+// 🚨 架构师修正：全面切换至英文环境，匹配欧洲业务生态
+import en from 'element-plus/dist/locale/en.mjs'
 </script>
 
 <style>
@@ -16,6 +17,8 @@ html, body, #app {
   padding: 0;
   height: 100%;
   width: 100%;
-  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
+  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 </style>

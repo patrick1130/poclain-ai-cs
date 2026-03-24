@@ -10,9 +10,9 @@ export default defineConfig({
     },
   },
   server: {
+    host: '127.0.0.1', // 强制绑定 IPv4 物理环回地址，彻底阻断 IPv6 解析漂移
     port: 5173,
-    // 🚨 架构师加固：将 localhost 全部显式替换为 127.0.0.1
-    // 这样 Node.js 代理会直接走 IPv4 链路，不会被 IPv6 [::1] 拒绝
+    strictPort: true,  // 端口防漂移锁：若 5173 被幽灵进程占用则直接报错，拒绝自动分配 5174
     proxy: {
       '/api/v1': {
         target: 'http://127.0.0.1:8000',

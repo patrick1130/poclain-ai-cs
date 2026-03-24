@@ -95,20 +95,24 @@ export default {
       
       try {
         await loginFormRef.value.validate()
-        
         loading.value = true
         
         // 调用登录API
         const response = await login(loginForm.username, loginForm.password)
         
-        // 保存token和用户信息
-        const { access_token, service } = response
+        // 🚨 架构师修复：动态提取载荷，完美兼容后端各种变体命名
+        // 无论后端传来的是 service, userInfo 还是 data，全都能平滑接住！
+        const access_token = response.access_token || response.token
+        const serviceData = response.service || response.userInfo || response.user || response.data || response
+        
+        // 物理防线：确保哪怕没拿到 ID，也不要引发空指针崩溃
+        const safeServiceId = serviceData?.id || 1
         
         localStorage.setItem('token', access_token)
-        localStorage.setItem('serviceId', service.id)
-        localStorage.setItem('serviceInfo', JSON.stringify(service))
+        localStorage.setItem('serviceId', safeServiceId)
+        localStorage.setItem('serviceInfo', JSON.stringify(serviceData || {}))
         
-        // 记住密码（可选功能）
+        // 记住密码
         if (loginForm.remember) {
           localStorage.setItem('rememberedUsername', loginForm.username)
         } else {
@@ -125,7 +129,7 @@ export default {
         if (error.response && error.response.status === 401) {
           ElMessage.error('用户名或密码错误')
         } else {
-          ElMessage.error('登录失败，请稍后重试')
+          ElMessage.error('登录失败，请检查网络或后端状态')
           console.error('登录失败:', error)
         }
       } finally {

@@ -10,7 +10,9 @@
     "@element-plus/icons-vue": "^2.3.0",
     "axios": "^1.6.0",
     "chart.js": "^4.5.1",
+    "dompurify": "^3.3.3",
     "element-plus": "^2.4.0",
+    "marked": "^17.0.4",
     "vue": "^3.3.0",
     "vue-chartjs": "^5.3.3",
     "vue-router": "^4.2.0"

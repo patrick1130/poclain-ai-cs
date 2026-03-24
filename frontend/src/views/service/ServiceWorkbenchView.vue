@@ -151,11 +151,27 @@ api.interceptors.request.use(config => {
 })
 
 const pendingSessions = computed(() => {
-  return sessionsList.value.filter(s => s.status === 'pending' || s.status === 'ai_handling')
+  // 🚨 架构师修复：扩大待接入队列的容错范围，兼容后端多种 pending 状态枚举
+  return sessionsList.value.filter(s => 
+    s.status === 'pending' || 
+    s.status === 'ai_handling' || 
+    s.status === 'queueing'
+  )
 })
 
 const activeSessions = computed(() => {
-  return sessionsList.value.filter(s => s.status === 'active' && String(s.service_agent_id) === String(serviceId))
+  // 🚨 架构师修复：消除“视图黑洞”，兼容后端未序列化 agent_id 的情况
+  return sessionsList.value.filter(s => {
+    // 首先校验是否属于处理中的枚举状态
+    const isActiveState = s.status === 'active' || s.status === 'agent_handling'
+    if (!isActiveState) return false
+    
+    // 兼容后端 ORM 序列化缺失：如果没传 agent_id，作为防卫机制直接放行，避免工单丢失
+    const assignedId = s.service_agent_id || s.agent_id
+    if (!assignedId) return true 
+    
+    return String(assignedId) === String(serviceId)
+  })
 })
 
 const fetchSessions = async () => {
@@ -180,6 +196,7 @@ const fetchSessions = async () => {
 
 const handleStatusChange = async (val) => {
   try {
+    // 🚨 架构师注：状态切换后端依然是 PUT 路由，保持不动
     await api.put('/service/status', { status: val })
     ElMessage.success(`客服状态已切换为: ${val === 'online' ? '在线' : '忙碌'}`)
   } catch (error) {
@@ -191,7 +208,8 @@ const handleStatusChange = async (val) => {
 const acceptSession = async (sessionId) => {
   actionLoading.value = sessionId
   try {
-    await api.put(`/service/sessions/${sessionId}/accept`)
+    // 🚨 物理核心修复 1：彻底消灭 405 Method Not Allowed
+    await api.post(`/service/sessions/${sessionId}/accept`)
     ElMessage.success('成功接管会话')
     const target = sessionIndexMap.get(String(sessionId))
     if (target) {
@@ -214,22 +232,21 @@ const enterSession = (sessionId) => {
 const handleTabChange = () => {}
 
 // ==========================================
-// 🚨 架构师重构：WebSocket 生命周期全局状态管理
+// 🚨 WebSocket 生命周期全局状态管理
 // ==========================================
 let ws = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
 let lockReconnect = false;
-let isDestroyed = false; // ✨ 核心开关：标记当前组件是否已死亡
+let isDestroyed = false; 
 
 const initWebSocket = () => {
-  if (isDestroyed) return; // 幽灵拦截
+  if (isDestroyed) return; 
   if (!serviceId) {
     ElMessage.error('无法初始化实时引擎：缺少坐席身份凭证');
     return;
   }
 
-  // 物理清空历史残留
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     ws.onclose = null; 
     ws.onerror = null;
@@ -240,8 +257,8 @@ const initWebSocket = () => {
   clearInterval(heartbeatTimer);
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // 🚨 架构师修复：弃用 Webpack 遗留环境变量，拥抱 Vite 原生 ESM 探针，彻底根除 ReferenceError 白屏死机
-  const host = import.meta.env.DEV ? '127.0.0.1:8000' : window.location.host;
+  // 🚨 架构师修复：彻底移除硬编码端口，强行依托当前宿主域，利用浏览器同源策略无缝穿透 Vite 代理
+  const host = window.location.host;
   const wsUrl = `${protocol}//${host}/ws/service/${serviceId}?token=${getToken()}`;
 
   try {
@@ -258,7 +275,6 @@ const initWebSocket = () => {
     }
     wsConnected.value = true;
     lockReconnect = false;
-    console.log('✅ [架构日志] WebSocket 链路激活');
     
     heartbeatTimer = setInterval(() => {
       if (ws.readyState === 1) {
@@ -278,7 +294,7 @@ const initWebSocket = () => {
   };
 
   ws.onclose = (e) => {
-    if (isDestroyed) return; // 🚨 幽灵组件禁止在此大呼小叫！
+    if (isDestroyed) return; 
     wsConnected.value = false;
     clearInterval(heartbeatTimer);
     console.warn(`❌ [架构日志] WebSocket 异常断开 (Code: ${e.code}, Reason: ${e.reason || '无'})`);
@@ -296,7 +312,6 @@ const reconnect = () => {
   if (isDestroyed || lockReconnect) return;
   lockReconnect = true;
   
-  console.log('🔄 [架构日志] 启动自动重连程序...');
   reconnectTimer = setTimeout(() => {
     lockReconnect = false;
     initWebSocket();
@@ -343,20 +358,18 @@ const formatTime = (isoString) => {
 }
 
 onMounted(() => {
-  isDestroyed = false; // 挂载时重置存活状态
+  isDestroyed = false; 
   fetchSessions();
   initWebSocket();
 })
 
-// 🚨 终极粉碎机：确保组件卸载时，绝不留下一根蛛丝马迹
 onBeforeUnmount(() => {
-  console.log('🧹 [架构日志] 组件卸载，执行物理级连接回收');
-  isDestroyed = true; // 拉下死亡电闸，所有相关回调全部失效
+  isDestroyed = true; 
   clearTimeout(reconnectTimer);
   clearInterval(heartbeatTimer);
   
   if (ws) {
-    ws.onclose = null; // 重点：剥夺遗言权，防止触发 reconnect()
+    ws.onclose = null; 
     ws.onerror = null;
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
       ws.close(1000, 'Component unmounted');
@@ -367,7 +380,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* [样式保持你原本的代码，未做删改] */
 .workbench-container { padding: 0; height: calc(100vh - 80px); display: flex; flex-direction: column; }
 .workbench-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 16px 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05); }
 .page-title { margin: 0; font-size: 20px; font-weight: 600; color: #1f2937; display: flex; align-items: center; }

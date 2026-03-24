@@ -6,7 +6,6 @@ services:
     container_name: poclain_wechat_db
     restart: always
     environment:
-      # 建议生产环境中将密码改得更复杂
       MYSQL_ROOT_PASSWORD: root_password_test
       MYSQL_DATABASE: poclain_ai_db
       MYSQL_USER: admin
@@ -15,11 +14,15 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     command: --default-authentication-plugin=mysql_native_password
-    # 增加健康检查，确保后端启动时数据库已就绪
     healthcheck:
       test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
       timeout: 5s
       retries: 10
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:7.0-alpine
@@ -29,6 +32,11 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - redis_data:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   backend:
     build:
@@ -38,28 +46,43 @@ services:
     restart: always
     ports:
       - "8000:8000"
-    # 🚨 架构师防线：采用密文隔离加载
-    # 所有的敏感密钥都去读取上一回合配置的 .env 文件，绝文明文写在这里
     env_file:
       - ./backend/.env
+    # 🚨 架构师加固：硬核注入环境变量，强制接管底层库行为
     environment:
-      # 覆盖/补充 .env 中的数据库连接，确保使用 docker 内部网络名 (db, redis)
       - DATABASE_URL=mysql+pymysql://admin:password@db:3306/poclain_ai_db
       - REDIS_URL=redis://redis:6379/0
-      # 【底层防线】强制掐断 ChromaDB 的遥测数据上报
-      - ANONYMIZED_TELEMETRY=False
       - TZ=Asia/Shanghai
+      # 🚨 物理封印：彻底掐断 ChromaDB 与 Posthog 的遥测心跳
+      - ANONYMIZED_TELEMETRY=False
+      - POSTHOG_DISABLED=1
+      - CHROMA_TELEMETRY_IMPL=none
+      # 🚨 物理锚点：强行将模型下载路径钉死在持久化数据卷中
+      - SENTENCE_TRANSFORMERS_HOME=/app/model_cache
+      - CHROMA_CACHE_DIR=/app/model_cache
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 512M
     volumes:
-      # 挂载物理目录，确保重启容器后向量大脑和上传文件不丢失
+      - ./backend:/app
       - ./backend/vector_db:/app/vector_db
       - ./backend/uploads:/app/uploads
-      # 挂载日志目录，方便外部采集
       - ./backend/logs:/app/logs
+      # 🚨 挂载卷映射
+      - chromadb_cache:/app/model_cache
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   frontend:
     build:
@@ -73,7 +96,14 @@ services:
       TZ: Asia/Shanghai
     depends_on:
       - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   mysql_data:
-  redis_data:
+  redis_data: # 🚨 声明持久化模型卷
+
+  chromadb_cache:
