@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
 import bcrypt
@@ -50,17 +50,22 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """签发 JWT"""
     to_encode = data.copy()
 
-    # 🚨 架构师修正：强制将 sub 转换为字符串，防止不同模块读取时类型不匹配导致鉴权崩溃
+    # 🚨 架构师修正 1：强制将 sub 转换为字符串
     if "sub" in to_encode:
         to_encode["sub"] = str(to_encode["sub"])
 
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire_minutes = getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 60)
-        expire = datetime.utcnow() + timedelta(minutes=expire_minutes)
+    # 🚨 核心修正 2：使用带时区感知的绝对 UTC 时间 (防止 CST/UTC 8小时偏差)
+    now = datetime.now(timezone.utc)
 
-    to_encode.update({"exp": expire, "iat": datetime.utcnow(), "type": "access_token"})
+    if expires_delta:
+        expire = now + expires_delta
+    else:
+        # 默认 60 分钟过期
+        expire_minutes = getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 60)
+        expire = now + timedelta(minutes=expire_minutes)
+
+    # iat (签发时间) 和 exp (过期时间) 必须使用相同的时区基准
+    to_encode.update({"exp": expire, "iat": now, "type": "access_token"})
 
     algorithm = getattr(settings, "ALGORITHM", "HS256")
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=algorithm)
