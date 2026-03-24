@@ -1,25 +1,36 @@
-# ==========================================
-# 1. 致命安全与环境变量 (Security & Env)
-# ==========================================
+==========================================
+1. 致命安全与环境变量 (Security & Env)
+==========================================
 .env
 .env.*
 !.env.example
 *.pem
 *.key
-# [架构师补充] 屏蔽可能导出的数据库备份文件
+
+[架构师补充] 屏蔽可能导出的数据库备份文件
 *.sql
 *.dump
 
-# ==========================================
-# 2. 向量数据库与业务数据 (Databases & Data)
-# ==========================================
+==========================================
+2. 容器化持久化数据 (Docker Volumes & Data)
+==========================================
+🚨 致命修正：绝对禁止将物理数据库镜像推送到 Git
+mysql_data/
+redis_data/
+/backend/mysql_data/
+/backend/redis_data/
+
+向量数据库与业务数据
 /backend/vector_db/
 vector_db/
+**/chroma-data.db
+**/index/*.bin
 *.db
 *.sqlite3
 *.sqlite
 /backend/uploads/
-# 🚨 架构师补丁：屏蔽 RAG 相关的重型物理数据与切图残骸
+
+🚨 架构师补丁：屏蔽 RAG 相关的重型物理数据与切图残骸
 /backend/temp_images/
 /backend/data/
 /backend/data/manuals/
@@ -27,10 +38,10 @@ vector_db/
 /backend/tmp/
 /backend/media/
 
-# ==========================================
-# 3. Python 后端核心屏蔽 (Backend / Python)
-# ==========================================
-__pycache__/
+==========================================
+3. Python 后端核心屏蔽 (Backend / Python)
+==========================================
+pycache/
 *.py[cod]
 *$py.class
 venv/
@@ -43,16 +54,18 @@ pip-delete-this-directory.txt
 .coverage
 htmlcov/
 .pytest_cache/
-# [架构师补充] 现代 Python 类型检查与 Linter 缓存
+
+[架构师补充] 现代 Python 类型检查与 Linter 缓存
 .mypy_cache/
 .ruff_cache/
-# [架构师补充] 异步任务队列 Celery 留下的调度碎片 (未来可能用到)
+
+[架构师补充] 异步任务队列 Celery 调度碎片
 celerybeat-schedule
 *.pid
 
-# ==========================================
-# 4. 前端与 Node.js 核心屏蔽 (Frontend / Vue)
-# ==========================================
+==========================================
+4. 前端与 Node.js 核心屏蔽 (Frontend / Vue)
+==========================================
 node_modules/
 dist/
 dist-ssr/
@@ -62,14 +75,16 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-# [架构师补充] Vue/Vite 编译与语法检查缓存
+
+[架构师补充] Vue/Vite 编译分析文件
+stats.html
 .eslintcache
 .stylelintcache
 node_modules/.cache/
 
-# ==========================================
-# 5. 操作系统与 IDE 缓存 (OS & IDE)
-# ==========================================
+==========================================
+5. 操作系统与 IDE 缓存 (OS & IDE)
+==========================================
 .DS_Store
 .DS_Store?
 ._*
@@ -77,26 +92,37 @@ node_modules/.cache/
 .Trashes
 ehthumbs.db
 Thumbs.db
-# [架构师补充] 苹果系统顽固隐藏文件
+
+[架构师补充] 苹果系统顽固隐藏文件
 .AppleDouble
 .LSOverride
 
-# VS Code
+VS Code
 .vscode/
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
 
-# JetBrains (PyCharm / WebStorm)
+JetBrains (PyCharm / WebStorm)
 .idea/
 *.iws
 *.iml
 *.ipr
 
-# ==========================================
-# 6. 系统日志 (Logs)
-# ==========================================
+==========================================
+6. 系统日志 (Logs)
+==========================================
 *.log
 logs/
 /backend/logs/
+
+==========================================
+7. 商业机密与核心语料资产 (Proprietary Data & ETL Corpus)
+==========================================
+🚨 致命修正：物理级屏蔽波克兰核心参数表格与清洗后的机密语料
+*.xlsx
+*.xls
+*.csv
+knowledge_base_flattened.txt
+*_flattened.txt
